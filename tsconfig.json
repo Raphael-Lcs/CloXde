@@ -1,0 +1,7 @@
+{
+  "extends": [
+    "./tsconfig.node.json",
+    "./tsconfig.web.json"
+  ],
+  "files": []
+}

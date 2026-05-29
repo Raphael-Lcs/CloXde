@@ -1,0 +1,1244 @@
+// Conversation engine: owns the pair of AcpRuntimes for a conversation, turns
+// agent updates into Messages, and drives the autopilot loop (A → B → A → …).
+//
+// Hand-off protocol (v0.6.1, the architect-decides design):
+//
+//   • CloXde injects a *system prompt* into each side on first prompt. The
+//     prompt tells them their role and the tag protocol below.
+//   • Architect drives. It decides — turn by turn — whether to hand work off:
+//        <<DELEGATE>>...<</DELEGATE>>  → CloXde extracts this and forwards
+//                                         it (and ONLY it) to the executor.
+//        <<DONE>>                       → architect declares the whole task
+//                                         finished; engine stops auto-loop.
+//        (neither)                       → architect is still chatting with
+//                                         the user (clarifying, replying to
+//                                         "hi", asking for spec). Engine
+//                                         does NOT forward to the executor.
+//   • Executor always reports back to architect after a turn. Its full reply
+//     is wrapped as `[执行者回报] … [结束回报]` and posted to architect as a
+//     user message, who then decides DELEGATE/DONE/chat.
+
+import { EventEmitter } from 'node:events'
+import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { dirname } from 'node:path'
+import type {
+  ContentBlock,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  ReadTextFileRequest,
+  ReadTextFileResponse,
+  WriteTextFileRequest,
+  WriteTextFileResponse,
+  SessionNotification
+} from '@agentclientprotocol/sdk'
+import type {
+  Conversation,
+  ConversationView,
+  Message,
+  MessageBlock,
+  Role,
+  Side,
+  Task,
+  TaskStatus
+} from '@shared/types'
+import {
+  conversationRepo,
+  messageRepo,
+  profileRepo,
+  projectRepo,
+  taskRepo
+} from '../storage/db'
+import { AcpRuntime } from '../acp/runtime'
+import { ensureUnder } from '../fs/inspector'
+import {
+  allowedTags,
+  classifyTool,
+  describeForbidden,
+  extractAction,
+  formatTaskPreamble,
+  isToolAllowed,
+  parsePlanSteps,
+  transition,
+  type TaskAction
+} from './state-machine'
+import { buildFirstTurnPrompt } from './prompts'
+import {
+  blocksToPlainText,
+  condenseError,
+  extractDelegate,
+  extractHandoff,
+  hasDone,
+  isAdapterNoise,
+  wrapDelegate,
+  wrapExecutorReport,
+  wrapTeamReport
+} from './transcript'
+import { applyUpdate } from './update-reducer'
+
+// --- Engine internals ------------------------------------------------------
+
+export interface EngineEvents {
+  'conversation-updated': (view: ConversationView) => void
+  'message-appended': (payload: { conversationId: string; message: Message }) => void
+  'message-patched': (payload: {
+    conversationId: string
+    messageId: string
+    patch: Partial<Pick<Message, 'blocks' | 'stopReason'>>
+  }) => void
+}
+
+interface SideRuntime {
+  side: Role
+  runtime: AcpRuntime
+  toolBlockIndex: Map<string, number>
+  streamingMessageId: string | null
+  /** In-memory mirror of the assistant message currently being streamed.
+   *  We mutate it on every chunk and persist via messageRepo.patch — much
+   *  cheaper than re-querying messageRepo.listByConversation() on each
+   *  ACP update (a long conversation has thousands of messages). Stays
+   *  in sync because only handleUpdate() writes to it during a turn. */
+  streamingMessage: Message | null
+  systemPromptSent: boolean
+  /** Per-side promise chain. Concurrent prompts on the same side wait their
+   *  turn; concurrent prompts across sides run in parallel. This is what
+   *  lets the user chat with PM while the team is still grinding. */
+  inFlight: Promise<void>
+}
+
+interface ActiveConversation {
+  conversation: Conversation
+  /** Present iff conversation.pmProfileId is set (3-agent mode). */
+  pm: SideRuntime | null
+  architect: SideRuntime
+  executor: SideRuntime
+  /** How many times in a row the engine has auto-nudged a side without
+   *  the agent making real progress (PLAN→PLAN, no-tag→no-tag, …). When
+   *  this hits 2 we stop nudging and idle, so a stuck agent can't burn
+   *  through the autoTurns cap on its own. Reset on any forward transition. */
+  stallNudges: number
+}
+
+export class ConversationEngine extends EventEmitter {
+  private active = new Map<string, ActiveConversation>()
+  /** Concurrent startIfNeeded() calls on the same conversation must NOT
+   *  spawn two adapter sets — the second runs while the first is still
+   *  awaiting newSession, sees `active.get(id) === undefined`, and races.
+   *  We dedupe via this in-flight promise map. */
+  private starting = new Map<string, Promise<ActiveConversation>>()
+
+  // --- Public API --------------------------------------------------------
+
+  async startIfNeeded(conversationId: string): Promise<ActiveConversation> {
+    const existing = this.active.get(conversationId)
+    if (existing) return existing
+    const inflight = this.starting.get(conversationId)
+    if (inflight) return inflight
+    const p = this.startInternal(conversationId).finally(() => {
+      this.starting.delete(conversationId)
+    })
+    this.starting.set(conversationId, p)
+    return p
+  }
+
+  private async startInternal(conversationId: string): Promise<ActiveConversation> {
+    // Re-check inside the lock — caller might have populated `active` while
+    // we were queuing.
+    const already = this.active.get(conversationId)
+    if (already) return already
+
+    const conv = conversationRepo.get(conversationId)
+    if (!conv) throw new Error(`Conversation not found: ${conversationId}`)
+    const project = projectRepo.get(conv.projectId)
+    if (!project) throw new Error(`Project not found: ${conv.projectId}`)
+    const architectProfile = profileRepo.get(conv.architectProfileId)
+    const executorProfile = profileRepo.get(conv.executorProfileId)
+    if (!architectProfile || !executorProfile) {
+      throw new Error('Conversation references a missing agent profile')
+    }
+
+    const projectRoot = project.rootDir
+
+    const makeFs = (): {
+      readTextFile: (p: ReadTextFileRequest) => Promise<ReadTextFileResponse>
+      writeTextFile: (p: WriteTextFileRequest) => Promise<WriteTextFileResponse>
+    } => ({
+      async readTextFile(params) {
+        if (!ensureUnder(projectRoot, params.path)) {
+          throw new Error(`refused read outside project root: ${params.path}`)
+        }
+        const text = await readFile(params.path, 'utf-8')
+        if (params.limit || params.line) {
+          const lines = text.split(/\r?\n/)
+          const start = (params.line ?? 1) - 1
+          const end = params.limit ? start + params.limit : lines.length
+          return { content: lines.slice(start, end).join('\n') }
+        }
+        return { content: text }
+      },
+      async writeTextFile(params) {
+        if (!ensureUnder(projectRoot, params.path)) {
+          throw new Error(`refused write outside project root: ${params.path}`)
+        }
+        await mkdir(dirname(params.path), { recursive: true })
+        await writeFile(params.path, params.content, 'utf-8')
+        return {}
+      }
+    })
+
+    const makePermission = (
+      role: Role
+    ): ((params: RequestPermissionRequest) => Promise<RequestPermissionResponse>) =>
+      async (params): Promise<RequestPermissionResponse> => {
+        // Path-C gating: consult the active task. The agent's tool call
+        // category (read / write / execute) is matched against the
+        // current (status, role) — if it isn't allowed, we deny with a
+        // human-readable reason so the agent can learn the protocol.
+        const live = this.active.get(conv.id)
+        const taskId = live?.conversation.activeTaskId
+        const task = taskId ? taskRepo.get(taskId) : null
+        if (task) {
+          // Extract the tool category from the request. ACP requestPermission
+          // doesn't ship tool kind directly — we infer from toolCall.kind
+          // when present, else default to 'other'.
+          const toolKind =
+            (params as { toolCall?: { kind?: string } }).toolCall?.kind
+          const category = classifyTool(toolKind)
+          if (!isToolAllowed(task.status, role, category)) {
+            const reason = describeForbidden(task.status, role)
+            this.recordSystemMessage(
+              live!,
+              `[${role}] 工具调用被拒（${category}）：${reason}`
+            )
+            const reject =
+              params.options.find((o) => o.kind === 'reject_once') ??
+              params.options.find((o) => o.kind === 'reject_always')
+            if (reject) {
+              return {
+                outcome: { outcome: 'selected', optionId: reject.optionId }
+              }
+            }
+            return { outcome: { outcome: 'cancelled' } }
+          }
+        }
+        // Default: allow. Mirrors pre-path-C behavior for legacy convs.
+        const allow =
+          params.options.find((o) => o.kind === 'allow_once') ??
+          params.options.find((o) => o.kind === 'allow_always') ??
+          params.options[0]
+        if (!allow) return { outcome: { outcome: 'cancelled' } }
+        return { outcome: { outcome: 'selected', optionId: allow.optionId } }
+      }
+
+    const architectRuntime = new AcpRuntime({
+      profile: architectProfile,
+      cwd: projectRoot,
+      permission: makePermission('architect'),
+      fs: makeFs(),
+      savedSessionId: conv.architectAcpSessionId,
+      onSessionReady: (sessionId, restored) => {
+        if (conv.architectAcpSessionId !== sessionId) {
+          conversationRepo.patch(conv.id, { architectAcpSessionId: sessionId })
+        }
+        const s = this.active.get(conv.id)
+        if (!s) return
+        if (restored) {
+          // Agent re-loaded its own context, including any previously sent
+          // system prompt — skip re-injection.
+          s.architect.systemPromptSent = true
+          this.recordSystemMessage(s, '架构师上下文已从历史会话恢复。')
+        }
+      }
+    })
+    const executorRuntime = new AcpRuntime({
+      profile: executorProfile,
+      cwd: projectRoot,
+      permission: makePermission('executor'),
+      fs: makeFs(),
+      savedSessionId: conv.executorAcpSessionId,
+      onSessionReady: (sessionId, restored) => {
+        if (conv.executorAcpSessionId !== sessionId) {
+          conversationRepo.patch(conv.id, { executorAcpSessionId: sessionId })
+        }
+        const s = this.active.get(conv.id)
+        if (!s) return
+        if (restored) {
+          s.executor.systemPromptSent = true
+          this.recordSystemMessage(s, '执行者上下文已从历史会话恢复。')
+        }
+      }
+    })
+
+    // Optional PM runtime (3-agent mode).
+    let pmRuntime: AcpRuntime | null = null
+    const pmProfile = conv.pmProfileId ? profileRepo.get(conv.pmProfileId) : null
+    if (pmProfile) {
+      pmRuntime = new AcpRuntime({
+        profile: pmProfile,
+        cwd: projectRoot,
+        permission: makePermission('pm'),
+        fs: makeFs(),
+        savedSessionId: conv.pmAcpSessionId,
+        onSessionReady: (sessionId, restored) => {
+          if (conv.pmAcpSessionId !== sessionId) {
+            conversationRepo.patch(conv.id, { pmAcpSessionId: sessionId })
+          }
+          const s = this.active.get(conv.id)
+          if (!s || !s.pm) return
+          if (restored) {
+            s.pm.systemPromptSent = true
+            this.recordSystemMessage(s, '产品经理上下文已从历史会话恢复。')
+          }
+        }
+      })
+    }
+
+    const slot: ActiveConversation = {
+      conversation: conv,
+      pm: pmRuntime
+        ? {
+            side: 'pm',
+            runtime: pmRuntime,
+            toolBlockIndex: new Map(),
+            streamingMessageId: null,
+            streamingMessage: null,
+            systemPromptSent: false,
+            inFlight: Promise.resolve()
+          }
+        : null,
+      architect: {
+        side: 'architect',
+        runtime: architectRuntime,
+        toolBlockIndex: new Map(),
+        streamingMessageId: null,
+        streamingMessage: null,
+        systemPromptSent: false,
+        inFlight: Promise.resolve()
+      },
+      executor: {
+        side: 'executor',
+        runtime: executorRuntime,
+        toolBlockIndex: new Map(),
+        streamingMessageId: null,
+        streamingMessage: null,
+        systemPromptSent: false,
+        inFlight: Promise.resolve()
+      },
+      stallNudges: 0
+    }
+    this.active.set(conv.id, slot)
+
+    if (slot.pm) this.wireSide(slot, slot.pm)
+    this.wireSide(slot, slot.architect)
+    this.wireSide(slot, slot.executor)
+
+    if (pmRuntime) {
+      void pmRuntime
+        .start()
+        .catch((err: Error) =>
+          this.recordSystemMessage(slot, `产品经理 启动失败：${err.message}`)
+        )
+    }
+    void architectRuntime
+      .start()
+      .catch((err: Error) =>
+        this.recordSystemMessage(slot, `architect 启动失败：${err.message}`)
+      )
+    void executorRuntime
+      .start()
+      .catch((err: Error) =>
+        this.recordSystemMessage(slot, `executor 启动失败：${err.message}`)
+      )
+
+    return slot
+  }
+
+  /** User sent a message. In 3-agent mode it always goes to PM. In legacy
+   *  2-agent mode it goes to `target` (defaults to primarySide).
+   *
+   *  CRITICAL: this only preempts the *destination* side. If the engineering
+   *  team is mid-task and the user types something to PM, the team keeps
+   *  working. PM observes the new user message and decides how to react
+   *  (extend the brief, send a new HANDOFF, just chat). */
+  async sendUserMessage(
+    conversationId: string,
+    text: string,
+    target?: Side,
+    attachments?: { data: string; mimeType: string }[]
+  ): Promise<void> {
+    const slot = await this.startIfNeeded(conversationId)
+    const initialSide: Role = slot.pm
+      ? 'pm'
+      : target ?? slot.conversation.primarySide
+    const sr = this.getSide(slot, initialSide)
+    if (!sr) return
+
+    // Preempt only the side we're sending to — team work is independent.
+    if (sr.streamingMessageId) {
+      try {
+        await sr.runtime.cancel()
+      } catch {
+        /* ignore — adapter may already be idle */
+      }
+      if (sr.streamingMessageId) {
+        this.patchMessage(slot.conversation.id, sr.streamingMessageId, {
+          stopReason: 'cancelled'
+        })
+        sr.streamingMessageId = null
+        sr.streamingMessage = null
+        sr.toolBlockIndex.clear()
+      }
+    }
+    // Drop any queued follow-ups on this side (e.g. a stale team-report that
+    // hasn't reached PM yet) so the user message takes precedence. The team
+    // can still emit fresh reports once their current cascade completes.
+    sr.inFlight = Promise.resolve()
+
+    // User intervention breaks any stall — the next agent turn gets a
+    // fresh budget of nudges before we idle on it again.
+    slot.stallNudges = 0
+
+    // NOTE: we deliberately do NOT reset autoTurnsUsed here. The cap exists
+    // to bound a single autopilot cascade — a chatty user shouldn't be able
+    // to silently uncap it. The counter resets when a new task is created
+    // (HANDOFF in driveStateMachine).
+    this.emitSnapshot(slot)
+
+    void this.runTurn(slot, initialSide, text, {
+      origin: 'user',
+      isUserInput: true,
+      attachments
+    }).catch((err: Error) => {
+      this.recordSystemMessage(slot, `[${initialSide}] ${err.message}`)
+    })
+  }
+
+  async cancel(conversationId: string): Promise<void> {
+    const slot = this.active.get(conversationId)
+    if (!slot) return
+    // Full stop — user explicitly hit Cancel run. Cancel all sides.
+    await this.cancelInternal(slot, 'user-cancel')
+    this.updateConversation(slot, { status: 'awaiting-user' })
+  }
+
+  async setAutopilot(conversationId: string, autopilot: boolean): Promise<void> {
+    const slot = await this.startIfNeeded(conversationId)
+    this.updateConversation(slot, { autopilot })
+  }
+
+  async setPrimarySide(conversationId: string, primarySide: Side): Promise<void> {
+    const slot = await this.startIfNeeded(conversationId)
+    this.updateConversation(slot, { primarySide })
+  }
+
+  async dispose(conversationId: string): Promise<void> {
+    const slot = this.active.get(conversationId)
+    if (!slot) return
+    if (slot.pm) await slot.pm.runtime.dispose()
+    await slot.architect.runtime.dispose()
+    await slot.executor.runtime.dispose()
+    this.active.delete(conversationId)
+  }
+
+  async disposeAll(): Promise<void> {
+    for (const id of [...this.active.keys()]) await this.dispose(id)
+  }
+
+  /** Build a ConversationView. `withMessages` defaults to true so the
+   *  `conversations.get` paths return full history; pass false for the
+   *  high-frequency tick emits (status / busySide changes) where consumers
+   *  ignore the message array anyway — loading + JSON-parsing the entire
+   *  history on every tick is the single biggest avoidable DB cost here. */
+  snapshot(
+    conversationId: string,
+    opts: { withMessages?: boolean } = {}
+  ): ConversationView | null {
+    const { withMessages = true } = opts
+    const conv = conversationRepo.get(conversationId)
+    if (!conv) return null
+    const architect = profileRepo.get(conv.architectProfileId)
+    const executor = profileRepo.get(conv.executorProfileId)
+    if (!architect || !executor) return null
+    const pm = conv.pmProfileId ? profileRepo.get(conv.pmProfileId) ?? undefined : undefined
+    const active = this.active.get(conversationId)
+    // Derive busySide from actual runtime streaming state — multiple sides
+    // can be busy at once (user chatting with PM while team is running).
+    // Priority: PM > architect > executor, since PM is what the user is
+    // looking at most of the time.
+    let busySide: Role | null = null
+    if (active) {
+      if (active.pm?.streamingMessageId) busySide = 'pm'
+      else if (active.architect.streamingMessageId) busySide = 'architect'
+      else if (active.executor.streamingMessageId) busySide = 'executor'
+    }
+    return {
+      ...conv,
+      pm,
+      architect,
+      executor,
+      messages: withMessages ? messageRepo.listByConversation(conversationId) : [],
+      busySide,
+      activeTask: conv.activeTaskId ? taskRepo.get(conv.activeTaskId) ?? undefined : undefined
+    }
+  }
+
+  // --- Internals ---------------------------------------------------------
+
+  private getSide(slot: ActiveConversation, role: Role): SideRuntime | null {
+    if (role === 'pm') return slot.pm
+    if (role === 'architect') return slot.architect
+    return slot.executor
+  }
+
+  private allSides(slot: ActiveConversation): SideRuntime[] {
+    return slot.pm ? [slot.pm, slot.architect, slot.executor] : [slot.architect, slot.executor]
+  }
+
+  private async cancelInternal(slot: ActiveConversation, _reason: string): Promise<void> {
+    void _reason
+    const promises: Promise<void>[] = []
+    for (const sr of this.allSides(slot)) promises.push(sr.runtime.cancel())
+    await Promise.all(promises.map((p) => p.catch(() => undefined)))
+    for (const sr of this.allSides(slot)) {
+      if (sr.streamingMessageId) {
+        this.patchMessage(slot.conversation.id, sr.streamingMessageId, {
+          stopReason: 'cancelled'
+        })
+        sr.streamingMessageId = null
+        sr.streamingMessage = null
+        sr.toolBlockIndex.clear()
+      }
+      sr.inFlight = Promise.resolve()
+    }
+    this.emitSnapshot(slot)
+  }
+
+  private wireSide(slot: ActiveConversation, sr: SideRuntime): void {
+    sr.runtime.on('update', (notification: SessionNotification) => {
+      this.handleUpdate(slot, sr, notification)
+    })
+    sr.runtime.on('error', (err: Error) => {
+      if (isAdapterNoise(err.message)) {
+        console.error(`[${sr.side}] runtime noise suppressed:`, err.message)
+        return
+      }
+      this.recordSystemMessage(slot, `[${sr.side}] ${condenseError(err.message)}`)
+    })
+    sr.runtime.on(
+      'exit',
+      ({ code, signal }: { code: number | null; signal: string | null }) => {
+        // A clean exit (code 0) on cancellation isn't worth reporting.
+        if (code === 0 || code === null) return
+        this.recordSystemMessage(
+          slot,
+          `[${sr.side}] adapter 退出 (code=${code}, signal=${signal ?? 'null'})`
+        )
+      }
+    )
+  }
+
+  /** Public runTurn — chains work onto the side's per-side queue so two
+   *  callers (e.g. user message and team-report) can both target PM and
+   *  execute in order without conflicting over the ACP session. */
+  private runTurn(
+    slot: ActiveConversation,
+    side: Role,
+    payloadText: string,
+    opts: {
+      origin: 'user' | 'peer-delegate' | 'peer-report' | 'pm-handoff' | 'team-report'
+      isUserInput: boolean
+      forwardedFromMessageId?: string
+      /** Image attachments, base64 + mimeType. Only populated for direct
+       *  user input — internal handoffs / cascades never have them. */
+      attachments?: { data: string; mimeType: string }[]
+    }
+  ): Promise<void> {
+    const sr = this.getSide(slot, side)
+    if (!sr) {
+      this.recordSystemMessage(slot, `运行配置错误：缺少 ${side} runtime`)
+      this.updateConversation(slot, { status: 'awaiting-user' })
+      return Promise.resolve()
+    }
+    const next = sr.inFlight.then(() =>
+      this.runTurnImpl(slot, sr, side, payloadText, opts)
+    )
+    // Swallow errors in the chain so a single failed turn doesn't poison
+    // the queue. The original caller still sees them via the returned promise.
+    sr.inFlight = next.catch(() => undefined)
+    return next
+  }
+
+  /**
+   * `payloadText` is the *raw* content the user/peer side wants to convey.
+   * The engine attaches the system prompt on the FIRST prompt of each side.
+   * If the conversation declares an `inheritedSummary` (i.e. user picked
+   * parent conversations in the new-conv dialog), we splice it in BETWEEN
+   * the system prompt and the user payload — that way the agent sees the
+   * inherited memory before its first actual user instruction, exactly as
+   * if a prior turn had laid it out.
+   *
+   * Image attachments are passed straight through as ACP `image` blocks
+   * (separate from the text payload).
+   */
+  private async runTurnImpl(
+    slot: ActiveConversation,
+    sr: SideRuntime,
+    side: Role,
+    payloadText: string,
+    opts: {
+      origin: 'user' | 'peer-delegate' | 'peer-report' | 'pm-handoff' | 'team-report'
+      isUserInput: boolean
+      forwardedFromMessageId?: string
+      attachments?: { data: string; mimeType: string }[]
+    }
+  ): Promise<void> {
+    // Path-C: prepend a CLOXDE-TASK preamble so the agent sees its current
+    // status + allowed actions before every turn (not just first). This is
+    // belt-and-suspenders with the permission gate — the gate enforces, the
+    // preamble teaches. Skip the preamble for terminal tasks so a stale
+    // activeTaskId (defensive — should be cleared by driveStateMachine)
+    // doesn't confuse PM with a "status=done" header on free-form chat.
+    const activeTask = slot.conversation.activeTaskId
+      ? taskRepo.get(slot.conversation.activeTaskId)
+      : null
+    const taskActive: boolean =
+      activeTask !== null &&
+      activeTask.status !== 'done' &&
+      activeTask.status !== 'failed'
+    const preamble =
+      taskActive && activeTask ? formatTaskPreamble(activeTask, side) + '\n\n---\n\n' : ''
+
+    const isFirstTurn = !sr.systemPromptSent
+    const promptText = isFirstTurn
+      ? buildFirstTurnPrompt(side, slot.conversation.inheritedSummary, preamble + payloadText)
+      : preamble + payloadText
+    // NOTE: don't flip systemPromptSent yet — if prompt() rejects (adapter
+    // crashed, channel closed) the system prompt was never actually
+    // delivered. Flipping prematurely would mean the next retry sees the
+    // agent without its role / protocol context. We set the flag only
+    // after a successful prompt resolution below.
+    // ACP `prompt` accepts a sequence of content blocks. Text first, then
+    // any image attachments — agents process them in order so the image is
+    // contextualized by the text that mentions it.
+    const blocks: ContentBlock[] = [{ type: 'text', text: promptText }]
+    const attachments = opts.attachments ?? []
+    for (const a of attachments) {
+      blocks.push({ type: 'image', data: a.data, mimeType: a.mimeType })
+    }
+
+    // Mirror the same blocks into the DB record so the UI replays them
+    // verbatim — text payload + each image as its own MessageBlock.
+    const persistedBlocks: MessageBlock[] = [
+      { type: 'text', text: payloadText }
+    ]
+    for (const a of attachments) {
+      persistedBlocks.push({ type: 'image', data: a.data, mimeType: a.mimeType })
+    }
+    const userMessage = messageRepo.create({
+      conversationId: slot.conversation.id,
+      side,
+      role: 'user',
+      blocks: persistedBlocks,
+      forwardedFromMessageId: opts.forwardedFromMessageId
+    })
+    this.emit('message-appended', {
+      conversationId: slot.conversation.id,
+      message: userMessage
+    })
+
+    const assistantMessage = messageRepo.create({
+      conversationId: slot.conversation.id,
+      side,
+      role: 'assistant',
+      blocks: []
+    })
+    sr.streamingMessageId = assistantMessage.id
+    sr.streamingMessage = assistantMessage
+    sr.toolBlockIndex.clear()
+    this.emit('message-appended', {
+      conversationId: slot.conversation.id,
+      message: assistantMessage
+    })
+
+    this.updateConversation(slot, { status: 'thinking' })
+    this.emitSnapshot(slot)
+
+    try {
+      const response = await sr.runtime.prompt(blocks)
+      // Prompt round-tripped successfully — system prompt has been
+      // received by the adapter. Flip the flag now so we don't re-send
+      // it on the next turn. (If we flipped before await and the prompt
+      // rejected, the next retry would talk to a context-less agent.)
+      if (isFirstTurn) sr.systemPromptSent = true
+      // Preemption guard: if cancelTeamRuntimes / sendUserMessage reset
+      // sr.streamingMessageId out from under us (because a NEW turn already
+      // started on this side), we MUST NOT touch sr's per-side state — that
+      // would nuke the new turn's streamingMessageId / toolBlockIndex and
+      // its updates would silently stop reaching the UI. The new turn owns
+      // the side now; we just finalize our own message and bail.
+      const stillOwnsSide = sr.streamingMessageId === assistantMessage.id
+      // Snapshot the final blocks BEFORE we clear the streaming mirror
+      // — we need them for finalText below, and re-querying messageRepo
+      // here would defeat the F5 optimization (one O(N) hit per turn).
+      const finalBlocks = sr.streamingMessage?.blocks ?? assistantMessage.blocks
+      this.patchMessage(slot.conversation.id, assistantMessage.id, {
+        stopReason: response.stopReason
+      })
+      if (stillOwnsSide) {
+        sr.streamingMessageId = null
+        sr.streamingMessage = null
+        sr.toolBlockIndex.clear()
+      }
+      this.emitSnapshot(slot)
+
+      if (response.stopReason === 'cancelled' || !stillOwnsSide) {
+        // Preempted (either by explicit cancel or by a side-replacing
+        // dispatch). Don't run driveStateMachine — the task state has
+        // moved on without us, and applying a stale transition would
+        // corrupt it.
+        if (stillOwnsSide) {
+          this.updateConversation(slot, { status: 'awaiting-user' })
+        }
+        return
+      }
+
+      const finalText = blocksToPlainText(finalBlocks)
+      const conv = conversationRepo.get(slot.conversation.id)
+      if (!conv) return
+      slot.conversation = conv
+
+      if (!conv.autopilot) {
+        this.updateConversation(slot, { status: 'awaiting-user' })
+        return
+      }
+
+      const overCap = (): boolean => {
+        // Read live — driveStateMachine / startFreshTask reset
+        // autoTurnsUsed mid-flight on HANDOFF, and capturing the value
+        // we saw at the start of this turn would make us double-count.
+        const c = slot.conversation
+        if (c.autoTurnsUsed < c.maxAutoTurns) return false
+        this.recordSystemMessage(
+          slot,
+          `已达到自动接力上限（${c.maxAutoTurns}），暂停。请用户介入。`
+        )
+        this.updateConversation(slot, { status: 'awaiting-user' })
+        return true
+      }
+      const bump = (): void => {
+        // Same reason as overCap — read the post-reset count, not the
+        // snapshot we took before the prompt landed.
+        this.updateConversation(slot, {
+          autoTurnsUsed: slot.conversation.autoTurnsUsed + 1
+        })
+      }
+      // Helper to fire-and-forget the next turn in the cascade. We don't
+      // await here: each side has its own queue, so cascaded turns run
+      // independently of the originating call. That's what lets the user
+      // chat with PM while the team is still mid-task.
+      const dispatch = (
+        toSide: Role,
+        body: string,
+        nextOrigin: 'pm-handoff' | 'team-report' | 'peer-delegate' | 'peer-report'
+      ): void => {
+        void this.runTurn(slot, toSide, body, {
+          origin: nextOrigin,
+          isUserInput: false,
+          forwardedFromMessageId: assistantMessage.id
+        }).catch((err: Error) => {
+          this.recordSystemMessage(slot, `[${toSide}] ${condenseError(err.message)}`)
+        })
+      }
+
+      // -------------------------------------------------------------------
+      // Path-C: drive the cascade off the task state machine.
+      //
+      // We branch on whether this conversation has an active task. If it
+      // does (3-agent path-C mode), we parse the agent's output against
+      // the actions allowed for (current status, current owner), apply
+      // the transition, and wake the next owner. Legacy free-form mode
+      // (no task) falls back to the old tag scan for backwards compat.
+      // -------------------------------------------------------------------
+      const activeTask = slot.conversation.activeTaskId
+        ? taskRepo.get(slot.conversation.activeTaskId)
+        : null
+
+      if (slot.pm && activeTask) {
+        await this.driveStateMachine({
+          slot,
+          task: activeTask,
+          side,
+          finalText,
+          bump,
+          overCap,
+          dispatch
+        })
+        return
+      }
+
+      // ---------- Legacy path (no active task) ---------------------------
+      if (side === 'pm') {
+        // 3-agent PM but no active task yet — first HANDOFF kicks one off.
+        // Same path also fires after a previous task hit DONE/FAIL (we
+        // clear activeTaskId on terminal transitions).
+        const handoff = extractHandoff(finalText)
+        if (!handoff) {
+          this.updateConversation(slot, { status: 'awaiting-user' })
+          return
+        }
+        if (overCap()) return
+        const newTask = taskRepo.create({
+          conversationId: slot.conversation.id,
+          brief: handoff,
+          status: 'planning',
+          owner: 'architect'
+        })
+        conversationRepo.patch(slot.conversation.id, {
+          activeTaskId: newTask.id,
+          autoTurnsUsed: 0
+        })
+        slot.conversation = conversationRepo.get(slot.conversation.id) ?? slot.conversation
+        slot.stallNudges = 0
+        bump()
+        dispatch('architect', handoff, 'pm-handoff')
+        this.emitSnapshot(slot)
+        return
+      }
+
+      if (side === 'architect') {
+        if (hasDone(finalText)) {
+          if (slot.pm) {
+            if (overCap()) return
+            bump()
+            dispatch('pm', wrapTeamReport(finalText), 'team-report')
+            return
+          }
+          this.recordSystemMessage(slot, '架构师宣告任务完成（<<DONE>>）。')
+          this.updateConversation(slot, { status: 'ended', endedAt: Date.now() })
+          return
+        }
+        const delegated = extractDelegate(finalText)
+        if (!delegated) {
+          if (slot.pm) {
+            if (overCap()) return
+            bump()
+            dispatch('pm', wrapTeamReport(finalText), 'team-report')
+            return
+          }
+          this.updateConversation(slot, { status: 'awaiting-user' })
+          return
+        }
+        if (overCap()) return
+        bump()
+        dispatch('executor', wrapDelegate(delegated), 'peer-delegate')
+        return
+      }
+
+      // side === 'executor' — always reports to architect.
+      if (overCap()) return
+      if (!finalText.trim()) {
+        this.updateConversation(slot, { status: 'awaiting-user' })
+        return
+      }
+      bump()
+      dispatch('architect', wrapExecutorReport(finalText), 'peer-report')
+    } catch (err) {
+      const errMsg = (err as Error).message
+      console.error(`[${side}] prompt rejected:`, errMsg)
+      const stillOwnsSide = sr.streamingMessageId === assistantMessage.id
+      this.patchMessage(slot.conversation.id, assistantMessage.id, {
+        stopReason: 'cancelled'
+      })
+      if (stillOwnsSide) {
+        sr.streamingMessageId = null
+        sr.streamingMessage = null
+        sr.toolBlockIndex.clear()
+      }
+      this.emitSnapshot(slot)
+      if (!isAdapterNoise(errMsg) && stillOwnsSide) {
+        // Don't surface errors from a preempted turn — the new turn is
+        // already what the user is watching.
+        this.recordSystemMessage(slot, `[${side}] ${condenseError(errMsg)}`)
+      }
+      if (stillOwnsSide) {
+        this.updateConversation(slot, { status: 'awaiting-user' })
+      }
+    }
+  }
+
+  /**
+   * Path-C state-machine driver. Called after an agent's turn finalizes
+   * when the conversation has an active task. We:
+   *
+   *   1. Look up the actions allowed for this task's (status, side)
+   *   2. Extract the LAST allowed tag in the agent's output
+   *   3. Apply the transition (status + owner shift)
+   *   4. Persist any side-effects (plan, result, brief) on the task row
+   *   5. Wake the next owner with the relevant body
+   *
+   * Quirks worth knowing:
+   *   • PM HANDOFF on a terminal task → start a *new* task, archiving the
+   *     old activeTaskId rather than failing the transition.
+   *   • DONE / FAIL → clear conversation.activeTaskId so the next free-form
+   *     PM turn doesn't carry a stale [CLOXDE-TASK status=done] preamble.
+   *   • Empty bodies on HANDOFF/DELEGATE/REPORT/DONE → don't dispatch a
+   *     blank prompt to the next owner (waste of tokens). Record a system
+   *     nudge instead and idle.
+   *   • "Agent emitted no recognized tag" → first miss auto-pings the same
+   *     side once with a reminder; second miss in a row idles. Counter
+   *     resets on any forward transition.
+   */
+  private async driveStateMachine(ctx: {
+    slot: ActiveConversation
+    task: Task
+    side: Role
+    finalText: string
+    bump: () => void
+    overCap: () => boolean
+    dispatch: (
+      toSide: Role,
+      body: string,
+      nextOrigin: 'pm-handoff' | 'team-report' | 'peer-delegate' | 'peer-report'
+    ) => void
+  }): Promise<void> {
+    const { slot, task, side, finalText, bump, overCap, dispatch } = ctx
+    const allowed = allowedTags(task.status, side)
+    if (allowed.length === 0) {
+      // This side wasn't supposed to be acting at all — stale turn fired
+      // after a state change. Don't escalate the stall counter; just idle.
+      this.updateConversation(slot, { status: 'awaiting-user' })
+      return
+    }
+    const found = extractAction(finalText, allowed)
+    if (!found) {
+      this.handleNoTag(slot, side, allowed, dispatch, bump, overCap)
+      return
+    }
+
+    const next = transition(task, found.action)
+    if (!next) {
+      // Tag found but not legal in this state. Most common case is the
+      // PM emitting HANDOFF on a terminal task — handle that as "open a
+      // new task" instead of bailing.
+      if (
+        found.action === 'HANDOFF' &&
+        side === 'pm' &&
+        (task.status === 'done' || task.status === 'failed')
+      ) {
+        await this.startFreshTask(slot, found.body, dispatch, bump, overCap)
+        return
+      }
+      this.recordSystemMessage(
+        slot,
+        `[${side}] <<${found.action}>> 在 status=${task.status} 不合法，引擎暂停。`
+      )
+      this.updateConversation(slot, { status: 'awaiting-user' })
+      return
+    }
+
+    // Reject empty payloads early so we don't dispatch a blank prompt to
+    // the next owner. Skip for FAIL/PLAN — those are valid info-only turns.
+    if (
+      (found.action === 'HANDOFF' ||
+        found.action === 'DELEGATE' ||
+        found.action === 'REPORT') &&
+      !found.body.trim()
+    ) {
+      this.recordSystemMessage(
+        slot,
+        `[${side}] <<${found.action}>> 内容为空，已忽略。请补全后重发。`
+      )
+      this.updateConversation(slot, { status: 'awaiting-user' })
+      return
+    }
+
+    // -- Persist side-effects on the task row before transitioning -------
+    const patches: Parameters<typeof taskRepo.patch>[1] = {
+      status: next.nextStatus,
+      owner: next.nextOwner
+    }
+    switch (found.action) {
+      case 'PLAN':
+        patches.plan = parsePlanSteps(found.body)
+        break
+      case 'DELEGATE': {
+        // The architect frequently emits PLAN AND DELEGATE in the same
+        // turn ("here's the plan, do step 1"). extractAction picks the
+        // LAST tag (DELEGATE) so PLAN would otherwise be lost. Scrape
+        // it back out and persist if found.
+        const planMatch = /<<PLAN>>([\s\S]*?)<<\/PLAN>>/i.exec(finalText)
+        if (planMatch) {
+          const steps = parsePlanSteps(planMatch[1].trim())
+          if (steps.length > 0) patches.plan = steps
+        }
+        break
+      }
+      case 'REPORT':
+        patches.result = found.body
+        break
+      case 'DONE':
+        patches.result = found.body || task.result
+        break
+      case 'FAIL':
+        patches.failureReason = found.body
+        break
+      case 'HANDOFF':
+        patches.brief = found.body || task.brief
+        break
+    }
+    taskRepo.patch(task.id, patches)
+
+    // Forward transition → reset stall counter.
+    slot.stallNudges = 0
+
+    // Terminal transitions clear the active task pointer so subsequent
+    // free-form PM chat doesn't carry a "status=done" preamble. The task
+    // row is preserved for history / TaskInspector.
+    if (next.nextStatus === 'done' || next.nextStatus === 'failed') {
+      conversationRepo.patch(slot.conversation.id, { activeTaskId: null })
+      slot.conversation =
+        conversationRepo.get(slot.conversation.id) ?? slot.conversation
+    }
+
+    // -- Decide what to forward & to whom --------------------------------
+    if (overCap()) return
+
+    switch (found.action) {
+      case 'HANDOFF':
+        // PM mid-task pivot. Cancel any in-flight team work so the new
+        // brief doesn't race the old one — await so the next prompt()
+        // doesn't collide on the same ACP session.
+        await this.cancelTeamRuntimes(slot)
+        this.updateConversation(slot, { autoTurnsUsed: 0 })
+        bump()
+        dispatch('architect', found.body, 'pm-handoff')
+        break
+      case 'PLAN':
+        // Architect committed a plan but hasn't delegated. Re-ping it
+        // with a reminder. Counts as a stall nudge — if architect plans
+        // again instead of delegating we'll idle on the second strike.
+        slot.stallNudges += 1
+        if (slot.stallNudges > 1) {
+          this.recordSystemMessage(
+            slot,
+            '架构师连续 PLAN 未派单，引擎暂停等待用户介入。'
+          )
+          this.updateConversation(slot, { status: 'awaiting-user' })
+          break
+        }
+        bump()
+        dispatch(
+          'architect',
+          '已记录你的 <<PLAN>>。请在下一轮发出 <<DELEGATE>>……<</DELEGATE>>，把第一步交给执行者。',
+          'pm-handoff'
+        )
+        break
+      case 'DELEGATE':
+        bump()
+        dispatch('executor', found.body, 'peer-delegate')
+        break
+      case 'REPORT':
+        bump()
+        dispatch('architect', wrapExecutorReport(found.body), 'peer-report')
+        break
+      case 'DONE':
+        if (slot.pm) {
+          bump()
+          dispatch('pm', wrapTeamReport(found.body), 'team-report')
+        } else {
+          this.recordSystemMessage(slot, '架构师宣告任务完成（<<DONE>>）。')
+          this.updateConversation(slot, { status: 'ended', endedAt: Date.now() })
+        }
+        break
+      case 'FAIL':
+        if (slot.pm) {
+          bump()
+          dispatch('pm', `[团队反馈]\n任务失败：${found.body}`, 'team-report')
+        } else {
+          this.recordSystemMessage(slot, `任务失败：${found.body}`)
+          this.updateConversation(slot, { status: 'awaiting-user' })
+        }
+        break
+    }
+    this.emitSnapshot(slot)
+  }
+
+  /** PM emitted HANDOFF on a terminal task → archive the activeTaskId and
+   *  open a fresh (planning, architect) task with the new brief. */
+  private async startFreshTask(
+    slot: ActiveConversation,
+    brief: string,
+    dispatch: (
+      toSide: Role,
+      body: string,
+      nextOrigin: 'pm-handoff' | 'team-report' | 'peer-delegate' | 'peer-report'
+    ) => void,
+    bump: () => void,
+    overCap: () => boolean
+  ): Promise<void> {
+    if (!brief.trim()) {
+      this.recordSystemMessage(slot, '[pm] <<HANDOFF>> 内容为空，已忽略。')
+      this.updateConversation(slot, { status: 'awaiting-user' })
+      return
+    }
+    if (overCap()) return
+    const newTask = taskRepo.create({
+      conversationId: slot.conversation.id,
+      brief,
+      status: 'planning',
+      owner: 'architect'
+    })
+    conversationRepo.patch(slot.conversation.id, {
+      activeTaskId: newTask.id,
+      autoTurnsUsed: 0
+    })
+    slot.conversation =
+      conversationRepo.get(slot.conversation.id) ?? slot.conversation
+    slot.stallNudges = 0
+    await this.cancelTeamRuntimes(slot)
+    bump()
+    dispatch('architect', brief, 'pm-handoff')
+    this.emitSnapshot(slot)
+  }
+
+  /** Stop any in-flight architect / executor runs and clear their queues.
+   *  Used when PM hands off mid-task — old work would race the new brief.
+   *  Awaits the ACP cancel so the next prompt() doesn't collide with the
+   *  in-flight one on the same session (some adapters serialize prompts
+   *  per-session and behave badly under concurrent dispatch). */
+  private async cancelTeamRuntimes(slot: ActiveConversation): Promise<void> {
+    const cancels: Promise<void>[] = []
+    for (const teamSide of [slot.architect, slot.executor]) {
+      if (teamSide.streamingMessageId) {
+        cancels.push(teamSide.runtime.cancel().catch(() => undefined))
+        this.patchMessage(slot.conversation.id, teamSide.streamingMessageId, {
+          stopReason: 'cancelled'
+        })
+        teamSide.streamingMessageId = null
+        teamSide.streamingMessage = null
+        teamSide.toolBlockIndex.clear()
+      }
+      teamSide.inFlight = Promise.resolve()
+    }
+    if (cancels.length > 0) {
+      // Cap the wait — Hermes adapters occasionally never ack cancel.
+      await Promise.race([
+        Promise.all(cancels).then(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, 1500))
+      ])
+    }
+  }
+
+  /** Agent's turn produced no tag the state machine recognizes. PM is
+   *  allowed to free-chat (no nudge needed). For team sides we re-ping
+   *  once with a reminder; if they miss again we idle. */
+  private handleNoTag(
+    slot: ActiveConversation,
+    side: Role,
+    allowed: TaskAction[],
+    dispatch: (
+      toSide: Role,
+      body: string,
+      nextOrigin: 'pm-handoff' | 'team-report' | 'peer-delegate' | 'peer-report'
+    ) => void,
+    bump: () => void,
+    overCap: () => boolean
+  ): void {
+    if (side === 'pm') {
+      this.updateConversation(slot, { status: 'awaiting-user' })
+      return
+    }
+    slot.stallNudges += 1
+    if (slot.stallNudges > 1) {
+      this.recordSystemMessage(
+        slot,
+        `[${side}] 连续两轮未发出允许的动作（${allowed
+          .map((a) => `<<${a}>>`)
+          .join(' / ')}），引擎暂停等待用户介入。`
+      )
+      this.updateConversation(slot, { status: 'awaiting-user' })
+      return
+    }
+    if (overCap()) return
+    bump()
+    const reminder = `上一轮没有按协议给出动作标签。允许的动作：${allowed
+      .map((a) => `<<${a}>>`)
+      .join(' / ')}。请在下一轮**末尾**用其中一个标签收尾。`
+    dispatch(
+      side === 'architect' ? 'architect' : 'executor',
+      reminder,
+      side === 'architect' ? 'pm-handoff' : 'peer-delegate'
+    )
+  }
+
+  private handleUpdate(
+    slot: ActiveConversation,
+    sr: SideRuntime,
+    notification: SessionNotification
+  ): void {
+    const messageId = sr.streamingMessageId
+    if (!messageId) return
+    // Use the in-memory streaming mirror — re-fetching via
+    // messageRepo.listByConversation() once per chunk is O(N) on
+    // every flush, which on a multi-thousand-message conversation
+    // visibly stalls the JS thread.
+    const message = sr.streamingMessage
+    if (!message || message.id !== messageId) return
+
+    const blocks = [...message.blocks]
+    const changed = applyUpdate(blocks, notification.update, sr.toolBlockIndex)
+
+    if (changed) {
+      messageRepo.patch(messageId, { blocks })
+      // Keep the streaming mirror in sync — next chunk reads from it.
+      sr.streamingMessage = { ...message, blocks }
+      this.emit('message-patched', {
+        conversationId: slot.conversation.id,
+        messageId,
+        patch: { blocks }
+      })
+    }
+  }
+
+  private patchMessage(
+    conversationId: string,
+    messageId: string,
+    patch: Partial<Pick<Message, 'blocks' | 'stopReason'>>
+  ): void {
+    messageRepo.patch(messageId, patch)
+    this.emit('message-patched', { conversationId, messageId, patch })
+  }
+
+  private recordSystemMessage(slot: ActiveConversation, text: string): void {
+    const msg = messageRepo.create({
+      conversationId: slot.conversation.id,
+      side: 'system',
+      role: 'system',
+      blocks: [{ type: 'text', text }]
+    })
+    this.emit('message-appended', { conversationId: slot.conversation.id, message: msg })
+  }
+
+  private updateConversation(
+    slot: ActiveConversation,
+    patch: Parameters<typeof conversationRepo.patch>[1]
+  ): void {
+    conversationRepo.patch(slot.conversation.id, patch)
+    const fresh = conversationRepo.get(slot.conversation.id)
+    if (fresh) slot.conversation = fresh
+    this.emitSnapshot(slot)
+  }
+
+  /** Re-emit a ConversationView snapshot — picks up busySide for the renderer
+   *  even when there's nothing to write to the DB. */
+  private emitSnapshot(slot: ActiveConversation): void {
+    // Tick emits carry conversation-level state only (status, busySide,
+    // autopilot, activeTask). Both consumers — the renderer IPC bridge and
+    // the WS bridge — discard the message array on update and rely on the
+    // dedicated message-appended / message-patched deltas, so skip the
+    // full-history read entirely here.
+    const view = this.snapshot(slot.conversation.id, { withMessages: false })
+    if (view) this.emit('conversation-updated', view)
+  }
+}
+
+export const conversationEngine = new ConversationEngine()

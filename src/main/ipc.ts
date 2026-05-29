@@ -1,0 +1,532 @@
+import { app, BrowserWindow, dialog, ipcMain, webContents } from 'electron'
+import { basename } from 'node:path'
+import { existsSync, statSync } from 'node:fs'
+import type {
+  AgentKind,
+  AgentProfile,
+  Conversation,
+  ConversationView,
+  DirEntry,
+  IpcResult,
+  Message,
+  Project,
+  Side
+} from '@shared/types'
+import { IPC } from '@shared/ipc-channels'
+import { conversationRepo, getDb, messageRepo, profileRepo, projectRepo } from './storage/db'
+import { conversationEngine } from './conversation/engine'
+import { buildInheritedSummary } from './conversation/summarizer'
+import { ensureWatch, listDir, listProjectFiles, openPath, stopWatch } from './fs/inspector'
+import {
+  broadcastWs,
+  getServerStatus
+} from './server/http-server'
+import { listTokens, revokeAll, revokeToken, rotatePin } from './server/auth'
+import { presence, type ActivityKind } from './server/presence'
+
+function ok<T>(data: T): IpcResult<T> {
+  return { ok: true, data }
+}
+function err(message: string): IpcResult<never> {
+  return { ok: false, error: message }
+}
+
+function isAgentKind(v: unknown): v is AgentKind {
+  return v === 'claude' || v === 'codex' || v === 'hermes'
+}
+function isSide(v: unknown): v is Side {
+  return v === 'architect' || v === 'executor'
+}
+
+function broadcast(channel: string, payload: unknown): void {
+  for (const wc of webContents.getAllWebContents()) {
+    if (wc.isDestroyed()) continue
+    wc.send(channel, payload)
+  }
+}
+
+/** Record the desktop user as having just done something on a conversation,
+ *  then broadcast the activity. Both LAN clients (via WS) and the desktop's
+ *  own renderer (via the IPC channel) hear the same payload, which lets
+ *  ChatScreen show "对方刚操作" banners regardless of who acted. */
+function recordDesktopPresence(conversationId: string, kind: ActivityKind): void {
+  const rec = presence.record(conversationId, { kind: 'desktop', label: 'desktop' }, kind)
+  broadcastWs('presence:activity', rec)
+  broadcast(IPC.PresenceActivityEvent, rec)
+}
+
+function buildConversationView(conversationId: string): ConversationView | null {
+  // Delegate to the engine so busySide is populated for active conversations.
+  return conversationEngine.snapshot(conversationId)
+}
+
+export function registerIpcHandlers(): void {
+  // Wire engine events → renderer.
+  conversationEngine.on('conversation-updated', (view: ConversationView) => {
+    broadcast(IPC.ConversationUpdatedEvent, view)
+  })
+  conversationEngine.on(
+    'message-appended',
+    (payload: { conversationId: string; message: Message }) => {
+      broadcast(IPC.MessageAppendedEvent, payload)
+    }
+  )
+  conversationEngine.on(
+    'message-patched',
+    (payload: { conversationId: string; messageId: string; patch: Partial<Message> }) => {
+      broadcast(IPC.MessagePatchedEvent, payload)
+    }
+  )
+
+  // --- App ---------------------------------------------------------------
+  ipcMain.handle(IPC.AppGetVersion, () => ok(app.getVersion()))
+
+  // --- Dialogs -----------------------------------------------------------
+  ipcMain.handle(IPC.ProjectsPickDir, async (e): Promise<IpcResult<string | null>> => {
+    const win = BrowserWindow.fromWebContents(e.sender) ?? undefined
+    const result = await dialog.showOpenDialog(win!, {
+      title: '选择项目文件夹',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (result.canceled || result.filePaths.length === 0) return ok(null)
+    return ok(result.filePaths[0])
+  })
+
+  ipcMain.handle(
+    IPC.PickDir,
+    async (e, opts: unknown): Promise<IpcResult<string | null>> => {
+      const win = BrowserWindow.fromWebContents(e.sender) ?? undefined
+      const o = (opts as { defaultPath?: string; title?: string } | undefined) ?? {}
+      const result = await dialog.showOpenDialog(win!, {
+        title: o.title ?? '选择文件夹',
+        defaultPath: o.defaultPath,
+        properties: ['openDirectory']
+      })
+      if (result.canceled || result.filePaths.length === 0) return ok(null)
+      return ok(result.filePaths[0])
+    }
+  )
+
+  // --- Projects ----------------------------------------------------------
+  ipcMain.handle(IPC.ProjectsList, (): IpcResult<Project[]> => ok(projectRepo.list()))
+
+  ipcMain.handle(
+    IPC.ProjectsListArchived,
+    (): IpcResult<Project[]> => ok(projectRepo.listArchived())
+  )
+
+  ipcMain.handle(IPC.ProjectsCreate, (_e, rootDir: unknown): IpcResult<Project> => {
+    if (typeof rootDir !== 'string' || !rootDir) return err('invalid rootDir')
+    if (!existsSync(rootDir) || !statSync(rootDir).isDirectory()) {
+      return err(`不是一个文件夹：${rootDir}`)
+    }
+    const project = projectRepo.upsertByRoot({
+      name: basename(rootDir) || rootDir,
+      rootDir
+    })
+    // Make sure each project ships with the two default agent profiles.
+    profileRepo.ensureDefaults(project.id)
+    return ok(project)
+  })
+
+  ipcMain.handle(IPC.ProjectsOpen, (_e, id: unknown): IpcResult<true> => {
+    if (typeof id !== 'string') return err('invalid id')
+    projectRepo.touch(id)
+    profileRepo.ensureDefaults(id)
+    return ok(true)
+  })
+
+  ipcMain.handle(IPC.ProjectsArchive, (_e, id: unknown): IpcResult<true> => {
+    if (typeof id !== 'string') return err('invalid id')
+    const proj = projectRepo.get(id)
+    if (!proj) return err(`项目不存在：${id}`)
+    if (proj.archivedAt) return ok(true) // already archived — idempotent
+    // Refuse if any conversation in this project is mid-turn — archiving
+    // while the engine is streaming would orphan the in-flight ACP request.
+    if (conversationRepo.hasThinkingInProject(id)) {
+      return err('该项目下还有正在运行的会话，先暂停或等它结束再归档。')
+    }
+    // Cascade: archive the project AND all its active conversations using a
+    // shared timestamp so unarchive can selectively bring back exactly that
+    // batch (conversations the user archived earlier keep their state).
+    const ts = Date.now()
+    conversationRepo.archiveAllByProject(id, ts)
+    projectRepo.archive(id)
+    // Project rows store their own archivedAt, but projectRepo.archive uses
+    // Date.now() internally; we want it to match `ts` for the unarchive
+    // cascade to work, so set it explicitly here. (Two adjacent writes are
+    // fine — the second is just a millisecond-precision adjustment.)
+    getDb()
+      .prepare('UPDATE projects SET archived_at = ? WHERE id = ?')
+      .run(ts, id)
+    stopWatch(id)
+    return ok(true)
+  })
+
+  ipcMain.handle(IPC.ProjectsUnarchive, (_e, id: unknown): IpcResult<true> => {
+    if (typeof id !== 'string') return err('invalid id')
+    const proj = projectRepo.get(id)
+    if (!proj) return err(`项目不存在：${id}`)
+    if (!proj.archivedAt) return ok(true) // already active — idempotent
+    // Reverse cascade: only unarchive conversations whose archivedAt matches
+    // the project's — those are the ones our cascade put away. Convs the
+    // user had archived manually before stay archived.
+    conversationRepo.unarchiveAllByProjectAt(id, proj.archivedAt)
+    projectRepo.unarchive(id)
+    return ok(true)
+  })
+
+  ipcMain.handle(IPC.ProjectsDelete, (_e, id: unknown): IpcResult<true> => {
+    if (typeof id !== 'string') return err('invalid id')
+    projectRepo.delete(id)
+    stopWatch(id)
+    return ok(true)
+  })
+
+  // --- Agent profiles ----------------------------------------------------
+  ipcMain.handle(
+    IPC.ProfilesListByProject,
+    (_e, projectId: unknown): IpcResult<AgentProfile[]> => {
+      if (typeof projectId !== 'string') return err('invalid projectId')
+      profileRepo.ensureDefaults(projectId)
+      return ok(profileRepo.listByProject(projectId))
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ProfilesUpsert,
+    (
+      _e,
+      input: unknown
+    ): IpcResult<AgentProfile> => {
+      const i = input as {
+        projectId: string
+        kind: AgentKind
+        name?: string
+        command?: string | null
+        args?: string[]
+        env?: Record<string, string>
+      }
+      if (!i || typeof i.projectId !== 'string' || !isAgentKind(i.kind)) {
+        return err('invalid profile payload')
+      }
+      return ok(profileRepo.upsert(i))
+    }
+  )
+
+  // --- Conversations -----------------------------------------------------
+  ipcMain.handle(
+    IPC.ConversationsListByProject,
+    (_e, projectId: unknown): IpcResult<Conversation[]> => {
+      if (typeof projectId !== 'string') return err('invalid projectId')
+      return ok(conversationRepo.listByProject(projectId))
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsListArchivedByProject,
+    (_e, projectId: unknown): IpcResult<Conversation[]> => {
+      if (typeof projectId !== 'string') return err('invalid projectId')
+      return ok(conversationRepo.listArchivedByProject(projectId))
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsCreate,
+    (
+      _e,
+      input: unknown
+    ): IpcResult<ConversationView> => {
+      const i = input as {
+        projectId: string
+        title?: string
+        /** When true (default) create a 3-agent (PM + architect + executor)
+         *  conversation. Set to false to create a legacy 2-agent one. */
+        withPm?: boolean
+        pmKind?: AgentKind
+        architectKind?: AgentKind
+        executorKind?: AgentKind
+        /** Optional parent conversations to inherit context from. CloXde
+         *  generates a mechanical markdown summary of these parents and
+         *  seeds the new conversation with it as a system message. */
+        parentIds?: string[]
+        /** When provided, overrides the auto-generated summary (user has
+         *  hand-edited it in the new-conversation dialog). */
+        summaryOverride?: string
+      }
+      if (!i || typeof i.projectId !== 'string') return err('invalid input')
+      const project = projectRepo.get(i.projectId)
+      if (!project) return err(`项目不存在：${i.projectId}`)
+      profileRepo.ensureDefaults(project.id)
+      const architectKind = isAgentKind(i.architectKind)
+        ? i.architectKind
+        : project.defaultArchitect
+      const executorKind = isAgentKind(i.executorKind)
+        ? i.executorKind
+        : project.defaultExecutor
+      const architect = profileRepo.findByKind(project.id, architectKind)
+      const executor = profileRepo.findByKind(project.id, executorKind)
+      if (!architect || !executor) return err('agent profile 缺失')
+
+      const withPm = i.withPm !== false
+      let pmProfileId: string | undefined
+      if (withPm) {
+        // Default PM = Claude Code. Hermes is available as a selectable
+        // option in Settings → Agent → Hermes, but until CloXde wires a
+        // permission UI for Hermes' tool calls, defaulting to it gets the
+        // user stuck on "OTHER 待执行" the moment Hermes tries to read a
+        // file / search sessions / etc.
+        const defaultPmKind: AgentKind = 'claude'
+        const pmKind = isAgentKind(i.pmKind) ? i.pmKind : defaultPmKind
+        const pm = profileRepo.findByKind(project.id, pmKind)
+        if (!pm) return err('PM profile 缺失')
+        pmProfileId = pm.id
+      }
+
+      // Filter parent ids: must belong to this project and not be self.
+      // Drop unknowns silently — the picker UI shouldn't have offered them.
+      const requestedParents = Array.isArray(i.parentIds) ? i.parentIds : []
+      const validParentIds = requestedParents.filter((pid) => {
+        if (typeof pid !== 'string') return false
+        const parent = conversationRepo.get(pid)
+        return !!parent && parent.projectId === project.id
+      })
+
+      // Generate the summary (or take the user's override).
+      let inheritedSummary: string | undefined
+      if (validParentIds.length > 0) {
+        if (typeof i.summaryOverride === 'string' && i.summaryOverride.trim()) {
+          inheritedSummary = i.summaryOverride.trim()
+        } else {
+          inheritedSummary = buildInheritedSummary(validParentIds) || undefined
+        }
+      }
+
+      const conv = conversationRepo.create({
+        projectId: project.id,
+        title: i.title,
+        pmProfileId,
+        architectProfileId: architect.id,
+        executorProfileId: executor.id,
+        primarySide: 'architect',
+        autopilot: true,
+        parentIds: validParentIds,
+        inheritedSummary
+      })
+
+      // Seed the new conversation with the rendered summary as a system
+      // message dated just-before-now so it sorts above any future input.
+      if (inheritedSummary) {
+        messageRepo.create({
+          conversationId: conv.id,
+          side: 'system',
+          role: 'system',
+          blocks: [{ type: 'text', text: inheritedSummary }],
+          ts: conv.createdAt - 1
+        })
+      }
+
+      const view = buildConversationView(conv.id)
+      if (!view) return err('failed to build conversation view')
+      return ok(view)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsGet,
+    (_e, id: unknown): IpcResult<ConversationView | null> => {
+      if (typeof id !== 'string') return err('invalid id')
+      return ok(buildConversationView(id))
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsPreviewInheritedSummary,
+    (_e, parentIds: unknown): IpcResult<string> => {
+      if (!Array.isArray(parentIds)) return err('invalid parentIds')
+      const ids = parentIds.filter((p): p is string => typeof p === 'string')
+      return ok(buildInheritedSummary(ids))
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsDelete,
+    async (_e, id: unknown): Promise<IpcResult<true>> => {
+      if (typeof id !== 'string') return err('invalid id')
+      // Same hung-adapter resilience as archive: don't await dispose on the
+      // critical path. The runtime tear-down is bounded by its own timeout
+      // (see AcpRuntime.dispose) and runs in the background.
+      conversationRepo.delete(id)
+      void conversationEngine.dispose(id).catch((e) =>
+        console.error('[delete] dispose failed for', id, e)
+      )
+      recordDesktopPresence(id, 'delete')
+      return ok(true)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsArchive,
+    async (_e, id: unknown): Promise<IpcResult<true>> => {
+      if (typeof id !== 'string') return err('invalid id')
+      // Persist the archive FIRST. Archiving is a pure DB flag flip — it
+      // does not depend on the runtime being torn down. If we awaited
+      // dispose here and the agent was stuck (e.g. Hermes hanging on a
+      // permission request with no UI to grant), the renderer would just
+      // see the archive button do nothing.
+      conversationRepo.archive(id)
+      // Best-effort runtime cleanup, fired-and-forgotten so a stuck adapter
+      // can't block the UI. dispose() itself is bounded by a timeout now.
+      void conversationEngine.dispose(id).catch((e) =>
+        console.error('[archive] dispose failed for', id, e)
+      )
+      recordDesktopPresence(id, 'archive')
+      return ok(true)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsUnarchive,
+    (_e, id: unknown): IpcResult<true> => {
+      if (typeof id !== 'string') return err('invalid id')
+      conversationRepo.unarchive(id)
+      recordDesktopPresence(id, 'unarchive')
+      return ok(true)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsSendUserMessage,
+    async (
+      _e,
+      conversationId: unknown,
+      text: unknown,
+      target: unknown,
+      attachments: unknown
+    ): Promise<IpcResult<true>> => {
+      if (typeof conversationId !== 'string') return err('invalid conversationId')
+      if (typeof text !== 'string') return err('invalid text')
+      // Validate attachments: array of { data: base64, mimeType }. Drop
+      // anything malformed silently so a stray paste doesn't bork the call.
+      const cleanAttachments: { data: string; mimeType: string }[] = []
+      if (Array.isArray(attachments)) {
+        for (const a of attachments) {
+          if (
+            a &&
+            typeof a === 'object' &&
+            typeof (a as { data?: unknown }).data === 'string' &&
+            typeof (a as { mimeType?: unknown }).mimeType === 'string'
+          ) {
+            cleanAttachments.push({
+              data: (a as { data: string }).data,
+              mimeType: (a as { mimeType: string }).mimeType
+            })
+          }
+        }
+      }
+      // Either text or attachments — both empty is "nothing to send".
+      if (!text.trim() && cleanAttachments.length === 0) return err('empty message')
+      const side = isSide(target) ? target : undefined
+      try {
+        await conversationEngine.sendUserMessage(
+          conversationId,
+          text,
+          side,
+          cleanAttachments
+        )
+        recordDesktopPresence(conversationId, 'send-message')
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsCancel,
+    async (_e, id: unknown): Promise<IpcResult<true>> => {
+      if (typeof id !== 'string') return err('invalid id')
+      await conversationEngine.cancel(id)
+      recordDesktopPresence(id, 'cancel')
+      return ok(true)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsSetAutopilot,
+    async (_e, id: unknown, value: unknown): Promise<IpcResult<true>> => {
+      if (typeof id !== 'string') return err('invalid id')
+      if (typeof value !== 'boolean') return err('invalid value')
+      await conversationEngine.setAutopilot(id, value)
+      recordDesktopPresence(id, 'autopilot')
+      return ok(true)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.ConversationsSetPrimarySide,
+    async (_e, id: unknown, side: unknown): Promise<IpcResult<true>> => {
+      if (typeof id !== 'string') return err('invalid id')
+      if (!isSide(side)) return err('invalid side')
+      await conversationEngine.setPrimarySide(id, side)
+      recordDesktopPresence(id, 'primary-side')
+      return ok(true)
+    }
+  )
+
+  // --- Filesystem inspector ----------------------------------------------
+  ipcMain.handle(
+    IPC.FsListDir,
+    async (
+      _e,
+      projectId: unknown,
+      relPath: unknown
+    ): Promise<IpcResult<DirEntry[]>> => {
+      if (typeof projectId !== 'string') return err('invalid projectId')
+      if (typeof relPath !== 'string') return err('invalid path')
+      const project = projectRepo.get(projectId)
+      if (!project) return err('project not found')
+      // Start the watcher lazily on first list, so we don't spend resources
+      // watching projects the user never inspects.
+      ensureWatch(project.id, project.rootDir, () => {
+        broadcast(IPC.FsChangedEvent, { projectId: project.id })
+      })
+      return listDir(project, relPath)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.FsOpenPath,
+    async (_e, projectId: unknown, relPath: unknown): Promise<IpcResult<true>> => {
+      if (typeof projectId !== 'string') return err('invalid projectId')
+      if (typeof relPath !== 'string') return err('invalid path')
+      const project = projectRepo.get(projectId)
+      if (!project) return err('project not found')
+      return openPath(project, relPath)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.FsListFiles,
+    async (_e, projectId: unknown): Promise<IpcResult<string[]>> => {
+      if (typeof projectId !== 'string') return err('invalid projectId')
+      const project = projectRepo.get(projectId)
+      if (!project) return err('project not found')
+      return listProjectFiles(project)
+    }
+  )
+
+  // --- LAN companion server ---------------------------------------------
+  ipcMain.handle(IPC.ServerGetStatus, () => ok(getServerStatus()))
+  ipcMain.handle(IPC.ServerRotatePin, () => ok(rotatePin()))
+  ipcMain.handle(IPC.ServerListDevices, () => ok(listTokens()))
+  ipcMain.handle(IPC.ServerRevokeDevice, (_e, token: unknown): IpcResult<true> => {
+    if (typeof token !== 'string') return err('invalid token')
+    revokeToken(token)
+    return ok(true)
+  })
+  ipcMain.handle(IPC.ServerRevokeAllDevices, (): IpcResult<true> => {
+    revokeAll()
+    return ok(true)
+  })
+}

@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+out/
+dist/
+
+# logs
+npm-debug.log*
+pnpm-debug.log*
+*.log
+
+# editor
+.vscode/
+.idea/
+.DS_Store
+
+# build artifacts
+*.tsbuildinfo
+
+# local config / db
+.cloxde-local/
+
+# local debug artifacts (logcat dumps, device screenshots, API response captures)
+.tmp-*
+pad-*.png
+resp*.json
+*.apk
+
+# local agent/editor config
+.claude/

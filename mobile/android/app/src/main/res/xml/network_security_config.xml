@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  CloXde Mobile is LAN-only: the user explicitly enters the desktop's IP
+  during pairing. We allow cleartext HTTP/WebSocket everywhere because:
+    • the previous IP-CIDR-based restriction did NOT work — Android's
+      <domain> element only accepts hostnames, never IP-range strings, so
+      "192.168.0.0/16" was a literal string lookup that never matched any
+      real LAN address. The result was that ALL cleartext was blocked
+      despite usesCleartextTraffic="true" on the application, and `fetch()`
+      to the desktop failed with no useful error (while curl from outside
+      the app worked fine).
+    • the security model for this app is "trusted home/office WiFi"; if
+      you want to harden it, the layer to harden is the desktop server
+      (token rotation, bind to one interface, etc.), not the client's
+      transport.
+
+  TLS support is intentionally NOT enabled — running the desktop server
+  over HTTPS would require self-signed certs + manual trust on every
+  paired device. Not worth the friction for a LAN companion.
+-->
+<network-security-config>
+  <base-config cleartextTrafficPermitted="true">
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </base-config>
+</network-security-config>
