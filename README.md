@@ -44,7 +44,7 @@ done — or until it needs you again.
         ┌──────────┐  <<HANDOFF>>   ┌────────────┐  <<DELEGATE>>  ┌────────────┐
  user → │    PM    │ ─────────────▶ │ Architect  │ ─────────────▶ │  Executor  │
         │ (产品经理) │ ◀───────────── │  (架构师)   │ ◀───────────── │  (执行者)   │
-        └──────────┘  team report   └────────────┘   [执行者回报]   └────────────┘
+        └──────────┘  team report   └────────────┘   <<REPORT>>     └────────────┘
               │                            │
               │  <<DONE>> / <<FAIL>>        │  edits files, runs tools
               ▼                            ▼
@@ -56,7 +56,7 @@ done — or until it needs you again.
   (`<<DELEGATE>>`), reviews the executor's report, and ultimately declares
   `<<DONE>>` or `<<FAIL>>`. It never touches files directly.
 - The **Executor** has the full tool set, does the work, and reports back
-  (`[执行者回报]`); the architect decides what's next.
+  (`<<REPORT>>`); the architect decides what's next.
 
 ## Development
 
@@ -150,7 +150,7 @@ mobile/src/                     React Native companion (tablet-first)
 | `<<HANDOFF>>…<</HANDOFF>>` | PM | Brief is ready — start the engineering team |
 | `<<PLAN>>…<</PLAN>>` | Architect | Working plan (repeatable, updates each time) |
 | `<<DELEGATE>>…<</DELEGATE>>` | Architect | Concrete instruction forwarded to the executor |
-| `[执行者回报]…[结束回报]` | Executor | Report back to the architect for review |
+| `<<REPORT>>…<</REPORT>>` | Executor | Report back to the architect for review |
 | `<<DONE>>` | Architect | Task finished — autopilot stops, PM wraps up |
 | `<<FAIL>>` | Architect | Task cannot be completed — autopilot stops |
 
