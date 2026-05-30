@@ -4,4 +4,4 @@ module.exports = {
   transformIgnorePatterns: [
     'node_modules/(?!(jest-)?@?react-native|@react-navigation|react-native-reanimated|react-native-gesture-handler)',
   ],
-};
+}

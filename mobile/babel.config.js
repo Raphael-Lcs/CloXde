@@ -5,4 +5,4 @@ module.exports = {
     // worklet pre-processor that needs to see the original AST.
     'react-native-reanimated/plugin'
   ]
-};
+}

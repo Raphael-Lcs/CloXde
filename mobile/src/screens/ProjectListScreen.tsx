@@ -21,6 +21,9 @@ import type { RootStackParamList } from '../navigation/types'
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Projects'>
 
+// Hoisted so FlatList doesn't see a brand-new component type every render.
+const Separator = (): React.ReactElement => <View style={styles.sep} />
+
 export default function ProjectListScreen(): React.ReactElement {
   const nav = useNavigation<Nav>()
   const [list, setList] = useState<Project[]>([])
@@ -91,7 +94,7 @@ export default function ProjectListScreen(): React.ReactElement {
             tintColor={colors.accent}
           />
         }
-        ItemSeparatorComponent={() => <View style={styles.sep} />}
+        ItemSeparatorComponent={Separator}
         ListEmptyComponent={
           <Text style={styles.empty}>
             没有项目。请到桌面端用「打开文件夹」创建一个项目。

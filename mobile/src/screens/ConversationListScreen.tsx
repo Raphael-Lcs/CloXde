@@ -25,6 +25,10 @@ import type { RootStackParamList } from '../navigation/types'
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Conversations'>
 type Route = RouteProp<RootStackParamList, 'Conversations'>
 
+// Hoisted so FlatList doesn't see a brand-new component type every render
+// (which would tear down + rebuild the separators each pass).
+const Separator = (): React.ReactElement => <View style={styles.sep} />
+
 export default function ConversationListScreen(): React.ReactElement {
   const nav = useNavigation<Nav>()
   const route = useRoute<Route>()
@@ -105,7 +109,7 @@ export default function ConversationListScreen(): React.ReactElement {
             tintColor={colors.accent}
           />
         }
-        ItemSeparatorComponent={() => <View style={styles.sep} />}
+        ItemSeparatorComponent={Separator}
         ListEmptyComponent={
           <View style={styles.emptyWrap}>
             <Text style={styles.empty}>
