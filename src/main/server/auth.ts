@@ -18,7 +18,7 @@
 //   • Designed for a trusted home/office WiFi. Not a substitute for TLS.
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { ensureCloxdeDir, getCloxdeDir } from '../paths'
 
@@ -62,7 +62,14 @@ function load(): AuthState {
 
 function persist(): void {
   if (!state) return
-  writeFileSync(authPath(), JSON.stringify(state, null, 2), 'utf8')
+  // Atomic write: a crash mid-`writeFileSync` would leave a truncated file,
+  // and load() silently regenerates a fresh PIN + empty token map on parse
+  // failure — i.e. every paired device gets kicked. Write to a temp file then
+  // rename (atomic on the same filesystem) so the real file is never partial.
+  const p = authPath()
+  const tmp = `${p}.tmp`
+  writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8')
+  renameSync(tmp, p)
 }
 
 function generatePin(): string {
