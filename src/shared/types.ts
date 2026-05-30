@@ -183,6 +183,20 @@ export type MessageBlock =
       mimeType: string
     }
 
+/** Per-turn metrics, attached to an assistant message once its turn settles.
+ *  Sourced from the ACP PromptResponse.usage (experimental — may be absent on
+ *  adapters that don't report it) plus an engine-measured wall-clock duration.
+ *  All fields optional: a turn may report time without tokens, or vice versa. */
+export interface TurnMetrics {
+  /** Wall-clock from prompt dispatch to turn settle, in milliseconds. */
+  durationMs?: number
+  inputTokens?: number
+  outputTokens?: number
+  totalTokens?: number
+  /** Cache read tokens, if the adapter distinguishes them. */
+  cachedTokens?: number
+}
+
 /** Where a message originated — user, system, or one of the three roles. */
 export type MessageSide = 'user' | 'system' | Role
 
@@ -204,6 +218,9 @@ export interface Message {
     | 'refusal'
     | 'max_turn_requests'
     | 'unknown'
+  /** Per-turn metrics (tokens, elapsed). Populated on assistant messages
+   *  when the turn settles; absent on user/system rows and older messages. */
+  metrics?: TurnMetrics
   ts: number
 }
 
@@ -258,6 +275,25 @@ export interface FilePreview {
   truncatedAt?: number
   /** Set when kind === 'image'. Base64-encoded payload + mimeType. */
   image?: { data: string; mimeType: string }
+}
+
+/** One entry in the project's git working-tree status. Backs the "改动"
+ *  (changes) panel — the list of files the agents (or anyone) modified in the
+ *  repo since the last commit. Paths are repo-relative, forward-slash. */
+export interface GitChange {
+  path: string
+  /** Coarse kind, derived from the porcelain status code. */
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked'
+  /** Original path when status === 'renamed'. */
+  oldPath?: string
+}
+
+/** Result of inspecting a project's git state for the changes panel.
+ *  `isRepo` false means the project root isn't a git repository — the panel
+ *  shows a hint instead of an empty list. */
+export interface GitStatus {
+  isRepo: boolean
+  changes: GitChange[]
 }
 
 // --- Cross-client presence (desktop + tablets sharing one server) ----------

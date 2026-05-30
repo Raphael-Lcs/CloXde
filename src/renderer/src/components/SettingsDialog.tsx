@@ -368,6 +368,15 @@ function formatDate(ts?: number): string {
 
 // --- LAN companion section -------------------------------------------------
 
+/** Tailscale CGNAT range (100.64.0.0/10). Mirrors net.ts on the main side so
+ *  the UI can flag which address works for remote (off-LAN) access. */
+function isTailscaleAddr(ip: string): boolean {
+  const m = /^100\.(\d{1,3})\./.exec(ip)
+  if (!m) return false
+  const second = Number(m[1])
+  return second >= 64 && second <= 127
+}
+
 interface PairedDevice {
   token: string
   label: string
@@ -443,7 +452,11 @@ function LanSection(): JSX.Element {
             <code className="lan-value">
               {status.addresses
                 .filter((a) => a !== status.primary)
-                .map((a) => `${a}:${status.port}`)
+                .map((a) =>
+                  isTailscaleAddr(a)
+                    ? `${a}:${status.port}（Tailscale · 远程）`
+                    : `${a}:${status.port}`
+                )
                 .join('  ·  ')}
             </code>
           </div>

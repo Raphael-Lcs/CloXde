@@ -116,9 +116,16 @@ export class AcpRuntime extends EventEmitter {
   private conn: ClientSideConnection | null = null
   private sessionId: string | null = null
   private starting: Promise<void> | null = null
+  /** Reject fn for the turn currently awaiting `prompt()`, if any. Lets the
+   *  exit/dispose paths unblock a caller instead of leaving it waiting on a
+   *  stream that will never answer (e.g. the adapter crashed mid-turn). */
+  private pendingPromptReject: ((err: Error) => void) | null = null
   /** When true, we suppress `update` events — used to silently drink the
    *  history replay that `loadSession` streams back. */
   private suppressUpdates = false
+  /** Set by restartFresh(): forces the next bringUp() to open a brand-new
+   *  session instead of resuming the saved one. Cleared once consumed. */
+  private forceFresh = false
 
   constructor(private readonly opts: AcpRuntimeOptions) {
     super()
@@ -127,7 +134,16 @@ export class AcpRuntime extends EventEmitter {
   /** Idempotent: spawn + initialize + create session. Returns sessionId. */
   async start(): Promise<string> {
     if (this.sessionId) return this.sessionId
-    if (!this.starting) this.starting = this.bringUp()
+    if (!this.starting) {
+      // A failed bring-up must NOT poison future retries. If we leave the
+      // rejected promise cached in `this.starting`, every later start() just
+      // re-awaits the same rejection and the side is bricked until the app
+      // restarts. Clear it on failure so the next call re-attempts spawn+init.
+      this.starting = this.bringUp().catch((err) => {
+        this.starting = null
+        throw err
+      })
+    }
     await this.starting
     if (!this.sessionId) throw new Error('ACP runtime failed to obtain session id')
     return this.sessionId
@@ -176,6 +192,25 @@ export class AcpRuntime extends EventEmitter {
     child.on('error', (err) => this.emit('error', err))
     child.on('exit', (code, signal) => {
       this.emit('exit', { code, signal })
+      // dispose() removes our listeners before it kills the process, so a
+      // handler running here means the adapter exited on its own — a crash,
+      // OOM, or the adapter bailing. The `=== child` guard ignores a late
+      // 'exit' from a previous process after we've already respawned.
+      if (this.process === child) {
+        // Drop the now-dead connection/session so the NEXT prompt() routes
+        // through start() and respawns a fresh process instead of writing
+        // into a closed stream forever.
+        this.process = null
+        this.conn = null
+        this.sessionId = null
+        this.starting = null
+        // If a turn was in flight, the adapter just died under it. Reject the
+        // pending prompt so the engine's turn loop recovers (→ awaiting-user)
+        // instead of hanging on a request the dead adapter can never answer.
+        this.rejectPending(
+          new Error(`adapter exited mid-turn (code=${code}, signal=${signal ?? 'null'})`)
+        )
+      }
     })
     // Adapters are chatty — codex-acp in particular spews verbose runtime
     // errors (e.g. Windows sandbox spawn failures) to stderr. We log them
@@ -222,8 +257,16 @@ export class AcpRuntime extends EventEmitter {
 
     // Try to resume a previous session if we have one and the agent supports
     // it. Failure (or missing capability) falls through to `newSession`.
+    // `forceFresh` (set by restartFresh for context-compaction) skips the
+    // resume entirely so we get a clean, empty session.
     let restored = false
-    if (this.opts.savedSessionId && initResult.agentCapabilities?.loadSession) {
+    const consumedForceFresh = this.forceFresh
+    this.forceFresh = false
+    if (
+      !consumedForceFresh &&
+      this.opts.savedSessionId &&
+      initResult.agentCapabilities?.loadSession
+    ) {
       try {
         this.suppressUpdates = true
         await conn.loadSession({
@@ -246,6 +289,11 @@ export class AcpRuntime extends EventEmitter {
       this.sessionId = session.sessionId
     }
 
+    // Remember the live session id so a *later* respawn (adapter crash) tries
+    // to resume the most recent session rather than a stale saved one. Safe
+    // to mutate — `readonly` guards the binding, not the object's fields.
+    this.opts.savedSessionId = this.sessionId
+
     this.opts.onSessionReady?.(this.sessionId, restored)
   }
 
@@ -253,7 +301,35 @@ export class AcpRuntime extends EventEmitter {
   async prompt(blocks: ContentBlock[]): Promise<PromptResponse> {
     if (!this.conn || !this.sessionId) await this.start()
     if (!this.conn || !this.sessionId) throw new Error('runtime not started')
-    return this.conn.prompt({ sessionId: this.sessionId, prompt: blocks })
+    const conn = this.conn
+    const sessionId = this.sessionId
+    // Wrap the SDK call so `rejectPending` (driven by exit/dispose) can settle
+    // this promise if the adapter dies before it answers. The turn loop runs
+    // one prompt per side at a time, so a single pending slot is enough.
+    return new Promise<PromptResponse>((resolve, reject) => {
+      this.pendingPromptReject = reject
+      const clear = (): void => {
+        if (this.pendingPromptReject === reject) this.pendingPromptReject = null
+      }
+      conn.prompt({ sessionId, prompt: blocks }).then(
+        (r) => {
+          clear()
+          resolve(r)
+        },
+        (e) => {
+          clear()
+          reject(e as Error)
+        }
+      )
+    })
+  }
+
+  /** Settle the in-flight prompt (if any) with an error. Idempotent. */
+  private rejectPending(err: Error): void {
+    const reject = this.pendingPromptReject
+    if (!reject) return
+    this.pendingPromptReject = null
+    reject(err)
   }
 
   /** Cancel the in-flight turn (if any). */
@@ -264,6 +340,25 @@ export class AcpRuntime extends EventEmitter {
     } catch {
       /* ignore — adapter may already be idle */
     }
+  }
+
+  /** Abandon the current process + ACP session and force a brand-new session
+   *  on the next prompt(). Used for context-compaction: when the adapter's
+   *  session history grows past the model's limit, we throw it away and
+   *  reseed a fresh session with a CloXde-built summary instead of the full
+   *  transcript. Unlike dispose(), this KEEPS our event listeners wired so
+   *  the engine keeps receiving updates from the respawned process. */
+  async restartFresh(): Promise<void> {
+    const old = this.process
+    // Null our refs BEFORE killing so the child's 'exit' handler sees
+    // `this.process !== child` and skips its state-clobbering / rejectPending
+    // branch (we're tearing down deliberately, not crashing).
+    this.process = null
+    this.conn = null
+    this.sessionId = null
+    this.starting = null
+    this.forceFresh = true
+    if (old && !old.killed) old.kill()
   }
 
   /** Tear everything down. The graceful `cancel()` is raced against a short
@@ -283,10 +378,14 @@ export class AcpRuntime extends EventEmitter {
     } finally {
       this.conn = null
       this.sessionId = null
+      this.starting = null
       if (this.process && !this.process.killed) {
         this.process.kill()
       }
       this.process = null
+      // Unblock any caller still awaiting prompt() — we're tearing down, and
+      // the cancel() above may not settle it (a wedged adapter never acks).
+      this.rejectPending(new Error('runtime disposed'))
       // Detach every engine-side listener. The process is dead; a late
       // 'exit'/'error' must not fire handlers bound to a now-disposed
       // conversation, and dropping them lets the runtime + its captured

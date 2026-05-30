@@ -46,6 +46,8 @@ export const IPC = {
   FsListFiles: 'fs:list-files',
   FsOpenPath: 'fs:open-path',
   FsChangedEvent: 'fs:changed', // { projectId } — throttled
+  FsGitStatus: 'fs:git-status', // working-tree changes for the 改动 panel
+  FsGitDiff: 'fs:git-diff', // unified diff for one file
 
   // LAN companion server (Android tablet)
   ServerGetStatus: 'server:get-status',

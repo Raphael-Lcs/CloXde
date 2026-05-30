@@ -9,6 +9,7 @@ interface ComposerProps {
   projectId?: string
   autopilot: boolean
   autoTurnsUsed: number
+  maxAutoTurns: number
   systemMessageCount: number
   showSystem: boolean
   onSend: (
@@ -51,6 +52,7 @@ export function Composer({
   projectId,
   autopilot,
   autoTurnsUsed,
+  maxAutoTurns,
   systemMessageCount,
   showSystem,
   onSend,
@@ -267,7 +269,24 @@ export function Composer({
         >
           自动接力 {autopilot ? '开' : '关'}
         </button>
-        <span className="composer-budget">已自动接力 {autoTurnsUsed} 轮</span>
+        {maxAutoTurns > 0 ? (
+          <span
+            className="composer-autoturns"
+            title={`自动接力 ${autoTurnsUsed} / ${maxAutoTurns} 轮`}
+          >
+            <span className="composer-autoturns-bar">
+              <span
+                className={`composer-autoturns-fill ${autoTurnsUsed >= maxAutoTurns ? 'full' : ''}`}
+                style={{ width: `${Math.min(100, (autoTurnsUsed / maxAutoTurns) * 100)}%` }}
+              />
+            </span>
+            <span className="composer-autoturns-text">
+              {autoTurnsUsed}/{maxAutoTurns}
+            </span>
+          </span>
+        ) : (
+          <span className="composer-budget">已自动接力 {autoTurnsUsed} 轮</span>
+        )}
         {systemMessageCount > 0 && (
           <button
             className={showSystem ? 'primary' : ''}

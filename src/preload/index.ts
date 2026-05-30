@@ -6,6 +6,7 @@ import type {
   Conversation,
   ConversationView,
   DirEntry,
+  GitStatus,
   IpcResult,
   Message,
   PresenceActivity,
@@ -142,6 +143,10 @@ const api = {
       ipcRenderer.invoke(IPC.FsListFiles, projectId),
     openPath: (projectId: string, relPath: string): Promise<IpcResult<true>> =>
       ipcRenderer.invoke(IPC.FsOpenPath, projectId, relPath),
+    gitStatus: (projectId: string): Promise<IpcResult<GitStatus>> =>
+      ipcRenderer.invoke(IPC.FsGitStatus, projectId),
+    gitDiff: (projectId: string, relPath: string): Promise<IpcResult<string>> =>
+      ipcRenderer.invoke(IPC.FsGitDiff, projectId, relPath),
     onChanged: (cb: (payload: { projectId: string }) => void): Unsubscribe =>
       on<{ projectId: string }>(IPC.FsChangedEvent, cb)
   },

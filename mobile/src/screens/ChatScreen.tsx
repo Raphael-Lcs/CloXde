@@ -23,6 +23,8 @@ import {
   ActivityIndicator,
   Alert,
   Switch,
+  Modal,
+  Pressable,
   useWindowDimensions
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
@@ -39,10 +41,24 @@ import { LeftSidebar } from '../components/LeftSidebar'
 import { NewConversationSheet } from '../components/NewConversationSheet'
 import { FileExplorerPanel } from '../components/FileExplorerPanel'
 import { TeamPanel } from '../components/TeamPanel'
+import { ChangesPanel } from '../components/ChangesPanel'
+import { JumpToConversationSheet } from '../components/JumpToConversationSheet'
 import { projects as projectsApi, fs as fsApi } from '../api/client'
+import { useWorkspace, selectWaiting } from '../store/workspace'
+import { useWsEvents } from '../hooks/useWsEvents'
 import { colors, fontSizes, radius, spacing } from '../utils/theme'
+import { basenameOf, detectMention, dirnameOf, scoreFiles } from '../utils/mention'
 import type { RootStackParamList } from '../navigation/types'
 import type { Message, MessageBlock, Project } from '../types'
+
+type RightPanel = 'files' | 'team' | 'changes'
+
+interface AttentionToast {
+  id: string
+  projectId: string
+  convId: string
+  title: string
+}
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Chat'>
 type Route = RouteProp<RootStackParamList, 'Chat'>
@@ -110,9 +126,20 @@ export default function ChatScreen(): React.ReactElement {
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [taskOpen, setTaskOpen] = useState(false)
-  const [rightPanel, setRightPanel] = useState<'files' | 'team' | null>(null)
+  const [rightPanels, setRightPanels] = useState<Set<RightPanel>>(new Set())
   const [showSystem, setShowSystem] = useState(true)
   const [activeProject, setActiveProject] = useState<Project | null>(null)
+  // Cross-project workspace store (projects + conversations) — drives the
+  // LeftSidebar, the attention badge, and the jump-to-conversation modal.
+  const loadAll = useWorkspace((s) => s.loadAll)
+  const reloadProject = useWorkspace((s) => s.reloadProject)
+  const waiting = useWorkspace(selectWaiting)
+  const [jumpOpen, setJumpOpen] = useState(false)
+  const [attentionOpen, setAttentionOpen] = useState(false)
+  const [toasts, setToasts] = useState<AttentionToast[]>([])
+  // Last-seen status per conversation — to detect transitions INTO
+  // awaiting-user (the moment that warrants a toast).
+  const prevStatusRef = useRef<Record<string, string>>({})
   // Project id for which the "新建协作会话" sheet is open (from the sidebar).
   const [newConvProjectId, setNewConvProjectId] = useState<string | null>(null)
   // --- @file autocomplete state ---
@@ -144,6 +171,75 @@ export default function ChatScreen(): React.ReactElement {
       setActiveProject(r.data.find((p) => p.id === view.projectId) ?? null)
     })
   }, [view?.projectId])
+
+  // Own the shared workspace store: load all projects + conversations once on
+  // mount so the sidebar, attention badge, and jump modal have data. Seed
+  // prevStatusRef from the loaded state so we only toast on genuine
+  // transitions INTO awaiting-user, not for sessions already waiting on mount.
+  useEffect(() => {
+    void loadAll().then(() => {
+      const { convsByProject } = useWorkspace.getState()
+      for (const convs of Object.values(convsByProject)) {
+        for (const c of convs) prevStatusRef.current[c.id] = c.status
+      }
+    })
+  }, [loadAll])
+
+  // Single WS subscription that keeps the workspace store fresh AND drives the
+  // cross-project attention loop: when any conversation (other than the one
+  // we're viewing) transitions INTO awaiting-user, surface a toast.
+  useWsEvents((e) => {
+    if (e.type !== 'conversation:updated') return
+    const c = e.payload
+    void reloadProject(c.projectId)
+    const prev = prevStatusRef.current[c.id]
+    prevStatusRef.current[c.id] = c.status
+    if (
+      c.status === 'awaiting-user' &&
+      prev !== 'awaiting-user' &&
+      c.id !== conversationId &&
+      !c.archivedAt
+    ) {
+      const title = c.title || `会话 ${c.id.slice(0, 6)}`
+      setToasts((t) => [
+        ...t.filter((x) => x.convId !== c.id),
+        { id: `${c.id}-${Date.now()}`, projectId: c.projectId, convId: c.id, title }
+      ])
+    }
+  })
+
+  // Auto-dismiss the oldest toast after 6s.
+  useEffect(() => {
+    if (toasts.length === 0) return undefined
+    const t = setTimeout(() => setToasts((cur) => cur.slice(1)), 6_000)
+    return () => clearTimeout(t)
+  }, [toasts])
+
+  const toggleRightPanel = useCallback((p: RightPanel): void => {
+    setRightPanels((s) => {
+      const next = new Set(s)
+      if (next.has(p)) next.delete(p)
+      else next.add(p)
+      return next
+    })
+  }, [])
+
+  const closeRightPanel = useCallback((p: RightPanel): void => {
+    setRightPanels((s) => {
+      const next = new Set(s)
+      next.delete(p)
+      return next
+    })
+  }, [])
+
+  const jumpToConversation = useCallback(
+    (_projectId: string, convId: string, title?: string): void => {
+      if (convId !== conversationId) nav.setParams({ conversationId: convId, title })
+      setAttentionOpen(false)
+      setToasts((t) => t.filter((x) => x.convId !== convId))
+    },
+    [conversationId, nav]
+  )
 
   // Filter visible messages + extract inheritance summary.
   const { inheritanceSummary, visibleMessages, systemMessageCount } = useMemo(() => {
@@ -321,9 +417,9 @@ export default function ChatScreen(): React.ReactElement {
                     styles.teamHint,
                     (view.busySide === 'architect' || view.busySide === 'executor') &&
                       styles.teamHintBusy,
-                    rightPanel === 'team' && styles.teamHintActive
+                    rightPanels.has('team') && styles.teamHintActive
                   ]}
-                  onPress={() => setRightPanel((p) => (p === 'team' ? null : 'team'))}
+                  onPress={() => toggleRightPanel('team')}
                   activeOpacity={0.7}
                 >
                   <View style={[styles.agentDot, { backgroundColor: colors.architect }]} />
@@ -362,10 +458,37 @@ export default function ChatScreen(): React.ReactElement {
             )}
           </View>
         </View>
-        {/* Right-rail toggle buttons */}
+        {/* Right-rail toggle + global action buttons */}
         <TouchableOpacity
-          style={[styles.titlebarBtn, rightPanel === 'files' && styles.titlebarBtnActive]}
-          onPress={() => setRightPanel((p) => (p === 'files' ? null : 'files'))}
+          style={styles.titlebarBtn}
+          onPress={() => setJumpOpen(true)}
+          accessibilityLabel="跳转会话"
+        >
+          <Text style={styles.titlebarBtnText}>🔍</Text>
+        </TouchableOpacity>
+        <View>
+          <TouchableOpacity
+            style={[styles.titlebarBtn, attentionOpen && styles.titlebarBtnActive]}
+            onPress={() => setAttentionOpen((v) => !v)}
+            accessibilityLabel="待处理会话"
+          >
+            <Text style={styles.titlebarBtnText}>🔔</Text>
+          </TouchableOpacity>
+          {waiting.length > 0 ? (
+            <View style={styles.bellBadge}>
+              <Text style={styles.bellBadgeText}>{waiting.length}</Text>
+            </View>
+          ) : null}
+        </View>
+        <TouchableOpacity
+          style={[styles.titlebarBtn, rightPanels.has('changes') && styles.titlebarBtnActive]}
+          onPress={() => toggleRightPanel('changes')}
+        >
+          <Text style={styles.titlebarBtnText}>📝</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.titlebarBtn, rightPanels.has('files') && styles.titlebarBtnActive]}
+          onPress={() => toggleRightPanel('files')}
         >
           <Text style={styles.titlebarBtnText}>📁</Text>
         </TouchableOpacity>
@@ -390,7 +513,28 @@ export default function ChatScreen(): React.ReactElement {
             {view.busySide ? ` · ${labelForRole(view.busySide)} 思考中` : ''}
           </Text>
           {view.autoTurnsUsed > 0 ? (
-            <Text style={styles.statusMeta}>· 接力 {view.autoTurnsUsed} 轮</Text>
+            <View style={styles.autoTurns}>
+              <Text style={styles.statusMeta}>
+                接力 {view.autoTurnsUsed}/{view.maxAutoTurns}
+              </Text>
+              <View style={styles.autoTurnsTrack}>
+                <View
+                  style={[
+                    styles.autoTurnsFill,
+                    {
+                      width: `${Math.min(
+                        100,
+                        view.maxAutoTurns > 0
+                          ? (view.autoTurnsUsed / view.maxAutoTurns) * 100
+                          : 0
+                      )}%`,
+                      backgroundColor:
+                        view.autoTurnsUsed >= view.maxAutoTurns ? colors.warn : colors.accent
+                    }
+                  ]}
+                />
+              </View>
+            </View>
           ) : null}
         </View>
         <View style={styles.statusRight}>
@@ -602,14 +746,14 @@ export default function ChatScreen(): React.ReactElement {
           />
         ) : null}
         {centerColumn}
-        {rightPanel === 'files' && activeProject ? (
-          <FileExplorerPanel
-            project={activeProject}
-            onClose={() => setRightPanel(null)}
-          />
+        {rightPanels.has('files') && activeProject ? (
+          <FileExplorerPanel project={activeProject} onClose={() => closeRightPanel('files')} />
         ) : null}
-        {rightPanel === 'team' ? (
-          <TeamPanel view={view} onClose={() => setRightPanel(null)} />
+        {rightPanels.has('changes') && activeProject ? (
+          <ChangesPanel project={activeProject} onClose={() => closeRightPanel('changes')} />
+        ) : null}
+        {rightPanels.has('team') ? (
+          <TeamPanel view={view} onClose={() => closeRightPanel('team')} />
         ) : null}
       </View>
 
@@ -631,6 +775,75 @@ export default function ChatScreen(): React.ReactElement {
             }
           }}
         />
+      ) : null}
+
+      <JumpToConversationSheet
+        open={jumpOpen}
+        onClose={() => setJumpOpen(false)}
+        onSelect={jumpToConversation}
+      />
+
+      {/* Attention popover — cross-project conversations awaiting the user. */}
+      <Modal
+        visible={attentionOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAttentionOpen(false)}
+      >
+        <Pressable style={styles.attentionBackdrop} onPress={() => setAttentionOpen(false)}>
+          <Pressable style={styles.attentionSheet} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.attentionTitle}>待你处理 · {waiting.length}</Text>
+            {waiting.length === 0 ? (
+              <Text style={styles.attentionEmpty}>没有等待中的会话</Text>
+            ) : (
+              <ScrollView style={{ maxHeight: 360 }}>
+                {waiting.map((w) => (
+                  <TouchableOpacity
+                    key={w.conv.id}
+                    style={styles.attentionRow}
+                    onPress={() => jumpToConversation(w.projectId, w.conv.id, w.conv.title)}
+                    activeOpacity={0.6}
+                  >
+                    <View style={styles.attentionDot} />
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.attentionConvTitle} numberOfLines={1}>
+                        {w.conv.title || `会话 ${w.conv.id.slice(0, 6)}`}
+                      </Text>
+                      <Text style={styles.attentionProject} numberOfLines={1}>
+                        {w.projectName}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Attention toasts — transient, tap to jump. */}
+      {toasts.length > 0 ? (
+        <View style={styles.toastStack} pointerEvents="box-none">
+          {toasts.map((t) => (
+            <TouchableOpacity
+              key={t.id}
+              style={styles.toast}
+              activeOpacity={0.8}
+              onPress={() => jumpToConversation(t.projectId, t.convId, t.title)}
+            >
+              <View style={styles.toastDot} />
+              <Text style={styles.toastText} numberOfLines={1}>
+                {t.title} · 等你输入
+              </Text>
+              <TouchableOpacity
+                onPress={() => setToasts((cur) => cur.filter((x) => x.id !== t.id))}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text style={styles.toastClose}>×</Text>
+              </TouchableOpacity>
+            </TouchableOpacity>
+          ))}
+        </View>
       ) : null}
     </SafeAreaView>
   )
@@ -684,59 +897,6 @@ function ownerTint(role: string): string {
 }
 function tintBg(hex: string): string {
   return hex + '1f'
-}
-
-/** Find an in-progress `@token` ending at the caret. The `@` must sit at the
- *  start of the input or right after whitespace; the token is whitespace-free. */
-function detectMention(text: string, caret: number): { start: number; query: string } | null {
-  for (let i = caret - 1; i >= 0; i--) {
-    const ch = text[i]
-    if (ch === '@') {
-      const prev = i > 0 ? text[i - 1] : ''
-      if (i === 0 || /\s/.test(prev)) return { start: i, query: text.slice(i + 1, caret) }
-      return null
-    }
-    if (/\s/.test(ch)) return null
-  }
-  return null
-}
-
-function basenameOf(path: string): string {
-  const i = path.lastIndexOf('/')
-  return i === -1 ? path : path.slice(i + 1)
-}
-function dirnameOf(path: string): string {
-  const i = path.lastIndexOf('/')
-  return i === -1 ? '' : path.slice(0, i)
-}
-function isSubsequence(hay: string, needle: string): boolean {
-  let i = 0
-  for (let j = 0; j < hay.length && i < needle.length; j++) {
-    if (hay[j] === needle[i]) i++
-  }
-  return i === needle.length
-}
-/** Rank files against an @-query: basename prefix beats basename substring
- *  beats full-path substring beats subsequence; ties break on shorter path. */
-function scoreFiles(files: string[], query: string): string[] {
-  const q = query.toLowerCase()
-  if (!q) return files.slice(0, 30)
-  const scored: { path: string; score: number }[] = []
-  for (const path of files) {
-    const lower = path.toLowerCase()
-    const base = basenameOf(lower)
-    let score = -1
-    if (base.startsWith(q)) score = 0
-    else if (base.includes(q)) score = 1
-    else if (lower.includes(q)) score = 2
-    else if (isSubsequence(lower, q)) score = 3
-    if (score >= 0) scored.push({ path, score })
-  }
-  scored.sort(
-    (a, b) =>
-      a.score - b.score || a.path.length - b.path.length || a.path.localeCompare(b.path)
-  )
-  return scored.map((s) => s.path)
 }
 
 const styles = StyleSheet.create({
@@ -813,6 +973,19 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accentSoft
   },
   titlebarBtnText: { fontSize: 16 },
+  bellBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 4,
+    borderRadius: 8,
+    backgroundColor: colors.warn,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  bellBadgeText: { color: colors.bg, fontSize: 9, fontWeight: '700' },
 
   cancelBtn: {
     backgroundColor: colors.danger,
@@ -835,6 +1008,15 @@ const styles = StyleSheet.create({
   statusDot: { width: 7, height: 7, borderRadius: 4 },
   statusText: { color: colors.textMuted, fontSize: 11 },
   statusMeta: { color: colors.textFaint, fontSize: 11 },
+  autoTurns: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  autoTurnsTrack: {
+    width: 56,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.border,
+    overflow: 'hidden'
+  },
+  autoTurnsFill: { height: 4, borderRadius: 2 },
   sysToggle: {
     paddingHorizontal: 8,
     paddingVertical: 3,
@@ -1004,5 +1186,72 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.borderSoft
   },
   mentionBase: { color: colors.text, fontSize: 13 },
-  mentionDir: { color: colors.textFaint, fontSize: 11, flexShrink: 1 }
+  mentionDir: { color: colors.textFaint, fontSize: 11, flexShrink: 1 },
+
+  // Attention popover (bell) — cross-project awaiting-user list.
+  attentionBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'flex-end',
+    paddingTop: 56,
+    paddingRight: spacing.md
+  },
+  attentionSheet: {
+    width: 320,
+    maxHeight: '70%',
+    backgroundColor: colors.bgElevated,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.sm
+  },
+  attentionTitle: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: '600',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6
+  },
+  attentionEmpty: {
+    color: colors.textFaint,
+    fontSize: 12,
+    textAlign: 'center',
+    paddingVertical: spacing.lg
+  },
+  attentionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 8,
+    borderRadius: radius.sm
+  },
+  attentionDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accent },
+  attentionConvTitle: { color: colors.text, fontSize: 13 },
+  attentionProject: { color: colors.textFaint, fontSize: 10, marginTop: 1 },
+
+  // Toast stack — bottom-center, transient awaiting-user nudges.
+  toastStack: {
+    position: 'absolute',
+    bottom: spacing.lg,
+    alignSelf: 'center',
+    gap: spacing.sm,
+    width: '100%',
+    maxWidth: 480,
+    paddingHorizontal: spacing.lg
+  },
+  toast: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.bgElevated,
+    borderWidth: 1,
+    borderColor: colors.warn,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm
+  },
+  toastDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.warn },
+  toastText: { color: colors.text, fontSize: 12, flex: 1 },
+  toastClose: { color: colors.textFaint, fontSize: 16, paddingHorizontal: 4 }
 })

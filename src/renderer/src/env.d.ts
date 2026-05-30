@@ -8,6 +8,7 @@ import type {
   Conversation,
   ConversationView,
   DirEntry,
+  GitStatus,
   IpcResult,
   Message,
   PresenceActivity,
@@ -92,6 +93,8 @@ interface CloXdeApi {
     listDir: (projectId: string, relPath: string) => Promise<IpcResult<DirEntry[]>>
     listFiles: (projectId: string) => Promise<IpcResult<string[]>>
     openPath: (projectId: string, relPath: string) => Promise<IpcResult<true>>
+    gitStatus: (projectId: string) => Promise<IpcResult<GitStatus>>
+    gitDiff: (projectId: string, relPath: string) => Promise<IpcResult<string>>
     onChanged: (cb: (payload: { projectId: string }) => void) => Unsubscribe
   }
   presence: {

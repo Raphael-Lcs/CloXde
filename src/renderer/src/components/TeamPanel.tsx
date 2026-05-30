@@ -94,6 +94,7 @@ function TeamMessageItem({ message }: { message: Message }): JSX.Element {
         <span className={`team-msg-dot side-${side}`} />
         <span className="team-msg-author">{label}</span>
         <span className="team-msg-status">{status}</span>
+        {!streaming && <TeamMetrics message={message} />}
       </div>
       <div className="team-msg-blocks">
         {message.blocks.map((b, i) => (
@@ -109,6 +110,27 @@ function TeamMessageItem({ message }: { message: Message }): JSX.Element {
       </div>
     </div>
   )
+}
+
+/** Compact per-turn metrics for a team message: elapsed + total tokens.
+ *  Mirrors the chip in ConversationStream; renders nothing without data. */
+function TeamMetrics({ message }: { message: Message }): JSX.Element | null {
+  const m = message.metrics
+  if (!m) return null
+  const parts: string[] = []
+  if (typeof m.durationMs === 'number') {
+    parts.push(m.durationMs < 1000 ? `${m.durationMs}ms` : `${(m.durationMs / 1000).toFixed(1)}s`)
+  }
+  const total =
+    m.totalTokens ??
+    (m.inputTokens != null || m.outputTokens != null
+      ? (m.inputTokens ?? 0) + (m.outputTokens ?? 0)
+      : undefined)
+  if (typeof total === 'number') {
+    parts.push(total < 1000 ? `${total} tok` : `${(total / 1000).toFixed(1)}k tok`)
+  }
+  if (parts.length === 0) return null
+  return <span className="team-msg-metrics">{parts.join(' · ')}</span>
 }
 
 function TeamBlock({

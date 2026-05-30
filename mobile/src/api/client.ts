@@ -11,6 +11,7 @@ import type {
   ConversationView,
   DirEntry,
   FilePreview,
+  GitStatus,
   IpcResult,
   Message,
   PresenceActivity,
@@ -192,7 +193,16 @@ export const fs = {
   /** Flat list of project files (POSIX relative paths) for @-mention
    *  autocomplete. Capped server-side. */
   listFiles: (projectId: string) =>
-    request<string[]>('GET', `/api/projects/${projectId}/fs/files`)
+    request<string[]>('GET', `/api/projects/${projectId}/fs/files`),
+  /** Working-tree git status — backs the 改动 panel. */
+  gitStatus: (projectId: string) =>
+    request<GitStatus>('GET', `/api/projects/${projectId}/git`),
+  /** Unified diff for one changed file. */
+  gitDiff: (projectId: string, path: string) =>
+    request<string>(
+      'GET',
+      `/api/projects/${projectId}/git/diff?path=${encodeURIComponent(path)}`
+    )
 }
 
 // Presence (cross-client awareness) -----------------------------------------

@@ -7,6 +7,7 @@ import type {
   Conversation,
   ConversationView,
   DirEntry,
+  GitStatus,
   IpcResult,
   Message,
   Project,
@@ -17,6 +18,7 @@ import { conversationRepo, getDb, messageRepo, profileRepo, projectRepo } from '
 import { conversationEngine } from './conversation/engine'
 import { buildInheritedSummary } from './conversation/summarizer'
 import { ensureWatch, listDir, listProjectFiles, openPath, stopWatch } from './fs/inspector'
+import { gitDiffFile, gitStatus } from './fs/git'
 import {
   broadcastWs,
   getServerStatus
@@ -513,6 +515,27 @@ export function registerIpcHandlers(): void {
       const project = projectRepo.get(projectId)
       if (!project) return err('project not found')
       return listProjectFiles(project)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.FsGitStatus,
+    async (_e, projectId: unknown): Promise<IpcResult<GitStatus>> => {
+      if (typeof projectId !== 'string') return err('invalid projectId')
+      const project = projectRepo.get(projectId)
+      if (!project) return err('project not found')
+      return gitStatus(project.rootDir)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.FsGitDiff,
+    async (_e, projectId: unknown, relPath: unknown): Promise<IpcResult<string>> => {
+      if (typeof projectId !== 'string') return err('invalid projectId')
+      if (typeof relPath !== 'string') return err('invalid path')
+      const project = projectRepo.get(projectId)
+      if (!project) return err('project not found')
+      return gitDiffFile(project.rootDir, relPath)
     }
   )
 

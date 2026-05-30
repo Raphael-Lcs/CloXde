@@ -586,6 +586,7 @@ interface MessageRow {
   blocks_json: string
   forwarded_from_message_id: string | null
   stop_reason: string | null
+  metrics_json: string | null
   ts: number
 }
 
@@ -598,6 +599,9 @@ function rowToMessage(row: MessageRow): Message {
     blocks: JSON.parse(row.blocks_json) as MessageBlock[],
     forwardedFromMessageId: row.forwarded_from_message_id ?? undefined,
     stopReason: (row.stop_reason ?? undefined) as Message['stopReason'],
+    metrics: row.metrics_json
+      ? (JSON.parse(row.metrics_json) as Message['metrics'])
+      : undefined,
     ts: row.ts
   }
 }
@@ -608,7 +612,7 @@ export const messageRepo = {
       getDb()
         .prepare(
           `SELECT id, conversation_id, side, role, blocks_json,
-                  forwarded_from_message_id, stop_reason, ts
+                  forwarded_from_message_id, stop_reason, metrics_json, ts
            FROM messages WHERE conversation_id = ? ORDER BY ts ASC, rowid ASC`
         )
         .all(conversationId) as MessageRow[]
@@ -622,7 +626,7 @@ export const messageRepo = {
     const rows = getDb()
       .prepare(
         `SELECT id, conversation_id, side, role, blocks_json,
-                forwarded_from_message_id, stop_reason, ts
+                forwarded_from_message_id, stop_reason, metrics_json, ts
          FROM messages WHERE conversation_id = ?
          ORDER BY ts DESC, rowid DESC LIMIT ?`
       )
@@ -671,7 +675,11 @@ export const messageRepo = {
   },
   patch(
     id: string,
-    patch: { blocks?: MessageBlock[]; stopReason?: Message['stopReason'] }
+    patch: {
+      blocks?: MessageBlock[]
+      stopReason?: Message['stopReason']
+      metrics?: Message['metrics']
+    }
   ): void {
     const fields: string[] = []
     const values: unknown[] = []
@@ -682,6 +690,10 @@ export const messageRepo = {
     if (patch.stopReason !== undefined) {
       fields.push('stop_reason = ?')
       values.push(patch.stopReason)
+    }
+    if (patch.metrics !== undefined) {
+      fields.push('metrics_json = ?')
+      values.push(patch.metrics === null ? null : JSON.stringify(patch.metrics))
     }
     if (fields.length === 0) return
     values.push(id)

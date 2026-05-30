@@ -202,6 +202,19 @@ const MIGRATIONS: Migration[] = [
           ADD COLUMN active_task_id TEXT REFERENCES tasks(id);
       `)
     }
+  },
+  {
+    version: 9,
+    name: 'messages-metrics',
+    up(db) {
+      // Per-turn observability: tokens + wall-clock elapsed, captured from the
+      // ACP PromptResponse.usage (experimental) and engine timing. Stored as a
+      // JSON blob so we can add fields without further migrations. Nullable —
+      // user/system rows and adapters that don't report usage leave it NULL.
+      db.exec(`
+        ALTER TABLE messages ADD COLUMN metrics_json TEXT;
+      `)
+    }
   }
 ]
 

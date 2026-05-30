@@ -17,10 +17,9 @@ import {
 import type {
   ConversationView,
   Message,
-  MessageBlock,
-  Role
+  MessageBlock
 } from '../types'
-import { colors, fontSizes, radius, spacing } from '../utils/theme'
+import { colors, spacing } from '../utils/theme'
 
 type StepKind = 'user' | 'pm' | 'architect' | 'executor'
 type StepStatus = 'running' | 'done' | 'failed' | 'cancelled'
@@ -56,12 +55,13 @@ export function TimelineStrip({
 
   // Auto-scroll to end whenever new steps appear, so the latest turn is
   // always visible (matches desktop behaviour).
+  const lastStatus = steps[steps.length - 1]?.status
   useEffect(() => {
     const t = setTimeout(() => {
       trackRef.current?.scrollToEnd({ animated: true })
     }, 80)
     return () => clearTimeout(t)
-  }, [steps.length, steps[steps.length - 1]?.status])
+  }, [steps.length, lastStatus])
 
   // Empty state — show a "工作组待命" placeholder rather than collapsing the
   // whole strip; otherwise the chat header looks broken when a fresh conv

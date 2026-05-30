@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { Message, MessageBlock, Side } from '@shared/types'
+import type { Message, MessageBlock, Side, TurnMetrics } from '@shared/types'
 
 /**
  * Whether a finalized assistant message has something the user actually
@@ -396,6 +396,7 @@ function AssistantFlow({ message }: { message: Message }): JSX.Element {
           ) : (
             !mode && status && <span className="msg-meta-status">{status}</span>
           )}
+          {!streaming && <MetricsChip metrics={message.metrics} />}
           {!expanded && (
             <span className="msg-meta-preview">
               {preview}
@@ -473,6 +474,51 @@ function statusLabel(stopReason: Message['stopReason']): string | null {
     default:
       return stopReason
   }
+}
+
+/** Compact token count: 1234 → "1.2k", 980 → "980". */
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n)
+  return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`
+}
+
+/** Human duration: <1s → "420ms", else "1.4s" / "1m12s". */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(1)}s`
+  const m = Math.floor(s / 60)
+  return `${m}m${Math.round(s - m * 60)}s`
+}
+
+/** Inline per-turn metrics: elapsed time + token usage. Renders nothing when
+ *  there's no data (older messages, or adapters that don't report usage and
+ *  somehow lack timing). The token figure prefers totalTokens, falling back
+ *  to in+out. A full breakdown shows on hover via `title`. */
+function MetricsChip({ metrics }: { metrics?: TurnMetrics }): JSX.Element | null {
+  if (!metrics) return null
+  const parts: string[] = []
+  if (typeof metrics.durationMs === 'number') parts.push(formatDuration(metrics.durationMs))
+  const total =
+    metrics.totalTokens ??
+    (metrics.inputTokens != null || metrics.outputTokens != null
+      ? (metrics.inputTokens ?? 0) + (metrics.outputTokens ?? 0)
+      : undefined)
+  if (typeof total === 'number') parts.push(`${formatTokens(total)} tok`)
+  if (parts.length === 0) return null
+
+  const detail: string[] = []
+  if (typeof metrics.durationMs === 'number') detail.push(`耗时 ${formatDuration(metrics.durationMs)}`)
+  if (typeof metrics.inputTokens === 'number') detail.push(`输入 ${metrics.inputTokens}`)
+  if (typeof metrics.outputTokens === 'number') detail.push(`输出 ${metrics.outputTokens}`)
+  if (typeof metrics.cachedTokens === 'number') detail.push(`缓存读 ${metrics.cachedTokens}`)
+  if (typeof metrics.totalTokens === 'number') detail.push(`合计 ${metrics.totalTokens}`)
+
+  return (
+    <span className="msg-meta-metrics" title={detail.join(' · ')}>
+      {parts.join(' · ')}
+    </span>
+  )
 }
 
 function previewOf(blocks: MessageBlock[], strip = false): string {

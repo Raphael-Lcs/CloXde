@@ -48,6 +48,7 @@ import {
   readFilePreview,
   stopWatch
 } from '../fs/inspector'
+import { gitDiffFile, gitStatus } from '../fs/git'
 import {
   attemptPair,
   getPin,
@@ -606,6 +607,32 @@ export function startHttpServer(port = DEFAULT_PORT): ServerHandle {
     }
     const relPath = String(req.query.path ?? '')
     const result = await readFilePreview(project, relPath)
+    res.json(result)
+  })
+
+  // Git working-tree inspection — backs the mobile "改动" panel. Mirrors the
+  // IPC.FsGitStatus / IPC.FsGitDiff handlers; read-only, scoped to rootDir.
+  r.get('/projects/:id/git', async (req, res) => {
+    const project = projectRepo.get(req.params.id)
+    if (!project) {
+      res.json(err('project not found'))
+      return
+    }
+    ensureWatch(project.id, project.rootDir, () => {
+      broadcastWs('fs:changed', { projectId: project.id })
+    })
+    const result = await gitStatus(project.rootDir)
+    res.json(result)
+  })
+
+  r.get('/projects/:id/git/diff', async (req, res) => {
+    const project = projectRepo.get(req.params.id)
+    if (!project) {
+      res.json(err('project not found'))
+      return
+    }
+    const relPath = String(req.query.path ?? '')
+    const result = await gitDiffFile(project.rootDir, relPath)
     res.json(result)
   })
 

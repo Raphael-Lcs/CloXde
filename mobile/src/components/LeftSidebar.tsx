@@ -1,30 +1,26 @@
 // Left rail of the Chat workspace — mirrors desktop's Sidebar.tsx layout:
-//   • 项目 header + 新建项目 button (placeholder — wired in Phase 2)
+//   • 项目 header
+//   • Search box + status filter chips (mirrors desktop Sidebar filter)
 //   • One row per project, expandable → conversation list
 //   • Active project + active conv visually highlighted
 //   • Footer: 设置 button, version label
 //
-// Loads all projects + per-project active conversations on mount and
-// listens to WS for live updates so it stays in sync while the user works.
-// Tapping a conversation calls onSelectConversation which routes the
-// current ChatScreen to that conv (without growing the back stack).
+// Reads projects + per-project conversations from the shared workspace store
+// (loaded + WS-refreshed by ChatScreen), so this component is now a pure view.
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useState } from 'react'
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
   ScrollView,
+  TextInput,
   ActivityIndicator
 } from 'react-native'
-import {
-  projects as projectsApi,
-  conversations as convsApi
-} from '../api/client'
-import type { Conversation, Project } from '../types'
-import { useWsEvents } from '../hooks/useWsEvents'
-import { colors, fontSizes, radius, spacing } from '../utils/theme'
+import type { Conversation, ConversationStatus } from '../types'
+import { useWorkspace } from '../store/workspace'
+import { colors, radius, spacing } from '../utils/theme'
 
 interface Props {
   activeProjectId: string | null
@@ -39,6 +35,13 @@ interface Props {
   versionLabel?: string
 }
 
+const STATUS_FILTERS: Array<[ConversationStatus | 'all', string]> = [
+  ['all', '全部'],
+  ['awaiting-user', '等待'],
+  ['thinking', '进行中'],
+  ['idle', '空闲']
+]
+
 export function LeftSidebar({
   activeProjectId,
   activeConversationId,
@@ -47,58 +50,24 @@ export function LeftSidebar({
   onOpenSettings,
   versionLabel = ''
 }: Props): React.ReactElement {
-  const [projects, setProjects] = useState<Project[]>([])
-  const [convsByProject, setConvsByProject] = useState<Record<string, Conversation[]>>({})
-  const [loading, setLoading] = useState(true)
+  const projects = useWorkspace((s) => s.projects)
+  const convsByProject = useWorkspace((s) => s.convsByProject)
+  const loading = useWorkspace((s) => s.loading)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<ConversationStatus | 'all'>('all')
 
-  const loadProjects = useCallback(async () => {
-    const r = await projectsApi.list()
-    if (r.ok) setProjects(r.data)
-  }, [])
-
-  const loadConvsForProject = useCallback(async (pid: string) => {
-    const r = await convsApi.listByProject(pid)
-    if (r.ok) {
-      setConvsByProject((curr) => ({
-        ...curr,
-        [pid]: [...r.data].sort((a, b) => b.createdAt - a.createdAt)
-      }))
-    }
-  }, [])
-
-  // Initial load.
-  useEffect(() => {
-    void (async () => {
-      setLoading(true)
-      await loadProjects()
-      setLoading(false)
-    })()
-  }, [loadProjects])
-
-  // When projects list changes, ensure we have convs loaded for each.
-  useEffect(() => {
-    for (const p of projects) {
-      if (!convsByProject[p.id]) void loadConvsForProject(p.id)
-    }
-  }, [projects, convsByProject, loadConvsForProject])
-
-  // Auto-expand the project containing the active conv.
-  useEffect(() => {
-    if (!activeProjectId) return
-    setCollapsed((c) => {
-      const next = new Set(c)
-      next.delete(activeProjectId)
-      return next
+  const q = query.trim().toLowerCase()
+  const filterActive = q.length > 0 || statusFilter !== 'all'
+  const filterConvs = (convs: Conversation[]): Conversation[] =>
+    convs.filter((c) => {
+      if (statusFilter !== 'all' && c.status !== statusFilter) return false
+      if (q && !(c.title ?? c.id).toLowerCase().includes(q)) return false
+      return true
     })
-  }, [activeProjectId])
-
-  // Live refresh: any conv:updated event → refetch that project's convs.
-  useWsEvents((e) => {
-    if (e.type === 'conversation:updated') {
-      void loadConvsForProject(e.payload.projectId)
-    }
-  })
+  const noMatches =
+    filterActive &&
+    projects.every((p) => filterConvs(convsByProject[p.id] ?? []).length === 0)
 
   const toggleProject = (id: string): void => {
     setCollapsed((c) => {
@@ -115,16 +84,43 @@ export function LeftSidebar({
         <Text style={styles.headerTitle}>项目</Text>
       </View>
 
+      <View style={styles.filter}>
+        <TextInput
+          style={styles.search}
+          placeholder="搜索会话…"
+          placeholderTextColor={colors.textFaint}
+          value={query}
+          onChangeText={setQuery}
+        />
+        <View style={styles.chips}>
+          {STATUS_FILTERS.map(([value, label]) => (
+            <TouchableOpacity
+              key={value}
+              style={[styles.chip, statusFilter === value && styles.chipActive]}
+              onPress={() => setStatusFilter(value)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.chipText, statusFilter === value && styles.chipTextActive]}>
+                {label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
       <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.list}>
-        {loading ? (
+        {loading && projects.length === 0 ? (
           <ActivityIndicator color={colors.accent} style={{ marginTop: spacing.lg }} />
         ) : projects.length === 0 ? (
           <Text style={styles.empty}>暂无项目</Text>
+        ) : noMatches ? (
+          <Text style={styles.empty}>无匹配会话</Text>
         ) : (
           projects.map((p) => {
             const isActive = p.id === activeProjectId
-            const isCollapsed = collapsed.has(p.id) && !isActive
-            const convs = convsByProject[p.id] ?? []
+            const isCollapsed = filterActive ? false : collapsed.has(p.id) && !isActive
+            const convs = filterConvs(convsByProject[p.id] ?? [])
+            if (filterActive && convs.length === 0) return null
             return (
               <View key={p.id} style={styles.projectGroup}>
                 <TouchableOpacity
@@ -244,6 +240,36 @@ const styles = StyleSheet.create({
     letterSpacing: 1.2,
     fontWeight: '600'
   },
+  filter: {
+    paddingHorizontal: spacing.sm,
+    paddingBottom: spacing.sm,
+    gap: 6
+  },
+  search: {
+    backgroundColor: colors.bgInput,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+    color: colors.text,
+    fontSize: 12,
+    borderWidth: 1,
+    borderColor: colors.borderSoft
+  },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  chip: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radius.sm,
+    backgroundColor: colors.bgInput,
+    borderWidth: 1,
+    borderColor: colors.borderSoft
+  },
+  chipActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent
+  },
+  chipText: { color: colors.textMuted, fontSize: 10.5 },
+  chipTextActive: { color: colors.bg, fontWeight: '600' },
   list: { paddingVertical: 2, paddingHorizontal: 4 },
   empty: {
     color: colors.textFaint,

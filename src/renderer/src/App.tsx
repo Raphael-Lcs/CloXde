@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { AgentKind, Conversation, Project, Side, Task, TaskStatus } from '@shared/types'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type {
+  AgentKind,
+  Conversation,
+  ConversationStatus,
+  Project,
+  Side,
+  Task,
+  TaskStatus
+} from '@shared/types'
 import { Sidebar } from './components/Sidebar'
 import { ConversationStream } from './components/ConversationStream'
 import { Timeline } from './components/Timeline'
@@ -9,8 +17,10 @@ import { ArchivedDialog } from './components/ArchivedDialog'
 import { NewConversationDialog } from './components/NewConversationDialog'
 import { FileExplorer } from './components/FileExplorer'
 import { TeamPanel } from './components/TeamPanel'
+import { ChangesPanel } from './components/ChangesPanel'
 import { Logo } from './components/Logo'
 import { TaskInspector } from './components/TaskInspector'
+import { CommandPalette, type Command } from './components/CommandPalette'
 import { useConversation } from './hooks/useConversation'
 import {
   usePresenceBanner,
@@ -34,13 +44,52 @@ export function App(): JSX.Element {
   const [archiveDialogProjectId, setArchiveDialogProjectId] = useState<string | null>(null)
   /** Which project (if any) currently has the "new conversation" dialog open. */
   const [newConvProjectId, setNewConvProjectId] = useState<string | null>(null)
-  // Right-side drawer (mutually exclusive: only one of these is open at a
-  // time, to keep horizontal real estate sane).
-  const [rightPanel, setRightPanel] = useState<'files' | 'team' | null>(null)
-  const fileExplorerOpen = rightPanel === 'files'
-  const teamPanelOpen = rightPanel === 'team'
+  // Right-side drawer: panels can coexist (stacked) and the drawer is
+  // drag-resizable.
+  const [rightPanels, setRightPanels] = useState<Array<'files' | 'team' | 'changes'>>([])
+  const [rightDrawerWidth, setRightDrawerWidth] = useState(340)
+  const fileExplorerOpen = rightPanels.includes('files')
+  const teamPanelOpen = rightPanels.includes('team')
+  const changesPanelOpen = rightPanels.includes('changes')
+  const toggleRightPanel = useCallback((panel: 'files' | 'team' | 'changes') => {
+    setRightPanels((list) =>
+      list.includes(panel) ? list.filter((p) => p !== panel) : [...list, panel]
+    )
+  }, [])
+  const startDrawerResize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      const startX = e.clientX
+      const startW = rightDrawerWidth
+      const onMove = (ev: MouseEvent): void => {
+        const next = startW + (startX - ev.clientX)
+        setRightDrawerWidth(Math.min(720, Math.max(260, next)))
+      }
+      const onUp = (): void => {
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        document.body.classList.remove('col-resizing')
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+      document.body.classList.add('col-resizing')
+    },
+    [rightDrawerWidth]
+  )
   const [showSystem, setShowSystem] = useState(true)
   const [taskInspectorOpen, setTaskInspectorOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  // Attention loop: which conversations need the user, surfaced as a titlebar
+  // badge + transient toasts. Lets the user walk away while autopilot grinds
+  // and only get pulled back when a run stops for them.
+  const [attentionOpen, setAttentionOpen] = useState(false)
+  const [toasts, setToasts] = useState<
+    { id: number; projectId: string; convId: string; title: string }[]
+  >([])
+  const toastIdRef = useRef(0)
+  // Last-seen status per conversation, so we can detect *transitions* into
+  // awaiting-user (vs. an already-waiting conv just being re-broadcast).
+  const prevStatusRef = useRef<Record<string, ConversationStatus>>({})
 
   const { view: conversation } = useConversation(activeConvId)
   // Cross-client awareness — banner appears when a paired tablet is also
@@ -77,14 +126,42 @@ export function App(): JSX.Element {
     })
   }, [refreshProjects])
 
+  // Prefetch conversation lists for every project (not just the active one),
+  // once each, so the sidebar status dots and the attention badge reflect the
+  // whole workspace — not only the project you're currently looking at. Live
+  // changes after this flow in via the onUpdated subscription below.
+  useEffect(() => {
+    for (const p of projects) {
+      if (!conversationsByProject[p.id]) void refreshConversations(p.id)
+    }
+  }, [projects, conversationsByProject, refreshConversations])
+
   useEffect(() => {
     const off = window.api.conversations.onUpdated((view) => {
-      if (view.projectId === activeProjectId) {
-        void refreshConversations(view.projectId)
+      // Refresh the affected project regardless of which one is active, so
+      // cross-project status stays live in the sidebar + attention badge.
+      void refreshConversations(view.projectId)
+      // Fire a toast only on a real transition INTO awaiting-user, for a
+      // conversation the user isn't already looking at. Requiring a known
+      // previous status avoids spamming on initial load of already-waiting
+      // conversations.
+      const prev = prevStatusRef.current[view.id]
+      prevStatusRef.current[view.id] = view.status
+      if (
+        view.status === 'awaiting-user' &&
+        prev &&
+        prev !== 'awaiting-user' &&
+        view.id !== activeConvId
+      ) {
+        const id = ++toastIdRef.current
+        const title = view.title ?? `会话 ${view.id.slice(0, 6)}`
+        setToasts((curr) => [...curr, { id, projectId: view.projectId, convId: view.id, title }])
+        // Auto-dismiss after a while; the badge keeps the persistent signal.
+        setTimeout(() => setToasts((curr) => curr.filter((t) => t.id !== id)), 8000)
       }
     })
     return off
-  }, [activeProjectId, refreshConversations])
+  }, [activeConvId, refreshConversations])
 
   // --- Project handlers --------------------------------------------------
   const handleOpenFolder = useCallback(async () => {
@@ -281,6 +358,29 @@ export function App(): JSX.Element {
     setActiveConvId(id)
   }, [])
 
+  // Jump to any conversation across the workspace — switches the active
+  // project first if needed. Backs the attention badge + toasts.
+  const jumpToConversation = useCallback(
+    async (projectId: string, convId: string) => {
+      if (projectId !== activeProjectId) await handleSelectProject(projectId)
+      setActiveConvId(convId)
+    },
+    [activeProjectId, handleSelectProject]
+  )
+
+  // Conversations (across all loaded projects) currently waiting on the user.
+  const waitingConversations = useMemo(() => {
+    const out: { projectId: string; projectName: string; conv: Conversation }[] = []
+    for (const p of projects) {
+      for (const c of conversationsByProject[p.id] ?? []) {
+        if (c.status === 'awaiting-user' && !c.archivedAt) {
+          out.push({ projectId: p.id, projectName: p.name, conv: c })
+        }
+      }
+    }
+    return out
+  }, [projects, conversationsByProject])
+
   // --- Composer actions --------------------------------------------------
   const handleSend = useCallback(
     async (
@@ -320,6 +420,92 @@ export function App(): JSX.Element {
     [projects, activeProjectId]
   )
 
+  // Ctrl/Cmd-K toggles the command palette.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault()
+        setPaletteOpen((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const commands = useMemo<Command[]>(() => {
+    const list: Command[] = []
+    if (activeProject) {
+      list.push({
+        id: 'new-conv',
+        label: '新建协作会话',
+        sub: activeProject.name,
+        keywords: 'new conversation 新建',
+        run: () => handleNewConversation(activeProject.id)
+      })
+      list.push({
+        id: 'toggle-team',
+        label: '切换：工作组进程面板',
+        keywords: 'team panel 架构师 执行者',
+        run: () => toggleRightPanel('team')
+      })
+      list.push({
+        id: 'toggle-changes',
+        label: '切换：项目改动面板',
+        keywords: 'changes diff git 改动',
+        run: () => toggleRightPanel('changes')
+      })
+      list.push({
+        id: 'toggle-files',
+        label: '切换：文件浏览器',
+        keywords: 'files explorer 文件',
+        run: () => toggleRightPanel('files')
+      })
+    }
+    if (conversation) {
+      list.push({
+        id: 'toggle-autopilot',
+        label: `自动接力：${conversation.autopilot ? '关闭' : '开启'}`,
+        keywords: 'autopilot 自动接力',
+        run: handleToggleAutopilot
+      })
+    }
+    list.push({
+      id: 'open-folder',
+      label: '打开文件夹作为项目',
+      keywords: 'open folder project 新建项目',
+      run: () => void handleOpenFolder()
+    })
+    list.push({
+      id: 'open-settings',
+      label: '打开设置',
+      keywords: 'settings 设置',
+      run: () => setSettingsOpen(true)
+    })
+    for (const p of projects) {
+      for (const c of conversationsByProject[p.id] ?? []) {
+        if (c.archivedAt) continue
+        list.push({
+          id: `jump-${c.id}`,
+          label: c.title ?? `会话 ${c.id.slice(0, 6)}`,
+          sub: `${p.name}${c.status === 'awaiting-user' ? ' · 等待中' : ''}`,
+          keywords: 'jump goto 跳转 会话',
+          run: () => void jumpToConversation(p.id, c.id)
+        })
+      }
+    }
+    return list
+  }, [
+    activeProject,
+    conversation,
+    projects,
+    conversationsByProject,
+    handleNewConversation,
+    toggleRightPanel,
+    handleToggleAutopilot,
+    handleOpenFolder,
+    jumpToConversation
+  ])
+
   // Count only the system messages the stream would actually show — i.e.
   // strip the adapter-noise patterns the renderer hides unconditionally.
   // Keep in sync with NOISE_PATTERNS in ConversationStream.tsx.
@@ -343,14 +529,11 @@ export function App(): JSX.Element {
     return n
   }, [conversation, NOISE_RE])
 
-  // Body grid columns:
-  //   • base               280px sidebar | 1fr main
-  //   • explorer open      + 320px explorer panel on the right
-  // Body grid: sidebar | main | (optional right drawer 320px)
-  const bodyClass =
-    activeProject && rightPanel !== null
-      ? 'body body-with-panel'
-      : 'body'
+  // Body grid columns: 280px sidebar | 1fr main | (optional resizable drawer).
+  const drawerOpen = !!activeProject && rightPanels.length > 0
+  const bodyStyle = drawerOpen
+    ? { gridTemplateColumns: `280px 1fr ${rightDrawerWidth}px` }
+    : undefined
 
   return (
     <div className="app">
@@ -360,10 +543,50 @@ export function App(): JSX.Element {
           <span>CloXde</span>
         </div>
         <div className="spacer" />
+        {waitingConversations.length > 0 && (
+          <div className="attention-wrap">
+            <button
+              className="attention-badge"
+              onClick={() => setAttentionOpen((v) => !v)}
+              title={`${waitingConversations.length} 个会话在等待你`}
+              aria-label="等待中的会话"
+            >
+              <BellIcon />
+              <span className="attention-count">{waitingConversations.length}</span>
+            </button>
+            {attentionOpen && (
+              <>
+                <div className="attention-backdrop" onClick={() => setAttentionOpen(false)} />
+                <div className="attention-popover">
+                  <div className="attention-popover-head">
+                    {waitingConversations.length} 个会话在等待
+                  </div>
+                  <div className="attention-list">
+                    {waitingConversations.map(({ projectId, projectName, conv }) => (
+                      <button
+                        key={conv.id}
+                        className="attention-item"
+                        onClick={() => {
+                          setAttentionOpen(false)
+                          void jumpToConversation(projectId, conv.id)
+                        }}
+                      >
+                        <span className="attention-item-title">
+                          {conv.title || '未命名会话'}
+                        </span>
+                        <span className="attention-item-project">{projectName}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
         {activeProject && conversation?.pm && (
           <button
             className={`titlebar-icon ${teamPanelOpen ? 'active' : ''}`}
-            onClick={() => setRightPanel((p) => (p === 'team' ? null : 'team'))}
+            onClick={() => toggleRightPanel('team')}
             title="工作组进程（架构师 + 执行者）"
             aria-label="工作组进程"
           >
@@ -372,8 +595,18 @@ export function App(): JSX.Element {
         )}
         {activeProject && (
           <button
+            className={`titlebar-icon ${changesPanelOpen ? 'active' : ''}`}
+            onClick={() => toggleRightPanel('changes')}
+            title="项目改动（git diff）"
+            aria-label="项目改动"
+          >
+            <DiffIcon />
+          </button>
+        )}
+        {activeProject && (
+          <button
             className={`titlebar-icon ${fileExplorerOpen ? 'active' : ''}`}
-            onClick={() => setRightPanel((p) => (p === 'files' ? null : 'files'))}
+            onClick={() => toggleRightPanel('files')}
             title="项目文件浏览器"
             aria-label="项目文件浏览器"
           >
@@ -381,7 +614,7 @@ export function App(): JSX.Element {
           </button>
         )}
       </div>
-      <div className={bodyClass}>
+      <div className="body" style={bodyStyle}>
         <Sidebar
           projects={projects}
           conversationsByProject={conversationsByProject}
@@ -424,9 +657,7 @@ export function App(): JSX.Element {
                           ? 'busy'
                           : ''
                       }`}
-                      onClick={() =>
-                        setRightPanel((p) => (p === 'team' ? null : 'team'))
-                      }
+                      onClick={() => toggleRightPanel('team')}
                       title="查看工作组进程"
                     >
                       <span className="pair-team-dot side-architect" />
@@ -505,6 +736,7 @@ export function App(): JSX.Element {
                 projectId={conversation.projectId}
                 autopilot={conversation.autopilot}
                 autoTurnsUsed={conversation.autoTurnsUsed}
+                maxAutoTurns={conversation.maxAutoTurns}
                 systemMessageCount={systemMessageCount}
                 showSystem={showSystem}
                 onSend={handleSend}
@@ -516,11 +748,31 @@ export function App(): JSX.Element {
             </>
           )}
         </main>
-        {activeProject && fileExplorerOpen && (
-          <FileExplorer project={activeProject} />
-        )}
-        {activeProject && teamPanelOpen && conversation?.pm && (
-          <TeamPanel conversation={conversation} />
+        {drawerOpen && (
+          <aside className="right-drawer">
+            <div
+              className="right-drawer-resize"
+              onMouseDown={startDrawerResize}
+              role="separator"
+              aria-orientation="vertical"
+              title="拖动调整宽度"
+            />
+            {teamPanelOpen && conversation?.pm && (
+              <div className="right-drawer-section">
+                <TeamPanel conversation={conversation} />
+              </div>
+            )}
+            {changesPanelOpen && (
+              <div className="right-drawer-section">
+                <ChangesPanel project={activeProject} />
+              </div>
+            )}
+            {fileExplorerOpen && (
+              <div className="right-drawer-section">
+                <FileExplorer project={activeProject} />
+              </div>
+            )}
+          </aside>
         )}
       </div>
 
@@ -569,6 +821,29 @@ export function App(): JSX.Element {
           onClose={() => setTaskInspectorOpen(false)}
         />
       )}
+      {paletteOpen && (
+        <CommandPalette commands={commands} onClose={() => setPaletteOpen(false)} />
+      )}
+      {toasts.length > 0 && (
+        <div className="toast-stack">
+          {toasts.map((t) => (
+            <button
+              key={t.id}
+              className="toast"
+              onClick={() => {
+                setToasts((list) => list.filter((x) => x.id !== t.id))
+                void jumpToConversation(t.projectId, t.convId)
+              }}
+            >
+              <BellIcon />
+              <div className="toast-body">
+                <div className="toast-title">{t.title || '未命名会话'}</div>
+                <div className="toast-sub">需要你的处理 · 点击跳转</div>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -591,6 +866,29 @@ function FolderIcon(): JSX.Element {
   )
 }
 
+function DiffIcon(): JSX.Element {
+  // Git-ish "compare" glyph: two nodes joined, suggesting a change set.
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="6" cy="6" r="2.4" />
+      <circle cx="6" cy="18" r="2.4" />
+      <path d="M6 8.4v7.2" />
+      <path d="M18 6h-4.5a2.5 2.5 0 0 0-2.5 2.5V18" />
+      <path d="M15.5 3.5 18 6l-2.5 2.5" />
+    </svg>
+  )
+}
+
 function TeamIcon(): JSX.Element {
   // Two stacked silhouettes — quick read as "a small team".
   return (
@@ -609,6 +907,25 @@ function TeamIcon(): JSX.Element {
       <path d="M3 19v-1a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v1" />
       <circle cx="17" cy="9" r="2.4" />
       <path d="M14.5 15.5h2.5a3.5 3.5 0 0 1 3.5 3.5V20" />
+    </svg>
+  )
+}
+
+function BellIcon(): JSX.Element {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
     </svg>
   )
 }

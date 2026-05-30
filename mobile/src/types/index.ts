@@ -180,6 +180,19 @@ export interface FilePreview {
   image?: { data: string; mimeType: string }
 }
 
+/** One entry in the project's git working-tree status. Repo-relative paths. */
+export interface GitChange {
+  path: string
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked'
+  oldPath?: string
+}
+
+/** Result of inspecting a project's git state for the changes panel. */
+export interface GitStatus {
+  isRepo: boolean
+  changes: GitChange[]
+}
+
 // --- Cross-client presence ------------------------------------------------
 
 export interface PresenceClientId {

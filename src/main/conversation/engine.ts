@@ -29,7 +29,8 @@ import type {
   ReadTextFileResponse,
   WriteTextFileRequest,
   WriteTextFileResponse,
-  SessionNotification
+  SessionNotification,
+  PromptResponse
 } from '@agentclientprotocol/sdk'
 import type {
   Conversation,
@@ -39,7 +40,8 @@ import type {
   Role,
   Side,
   Task,
-  TaskStatus
+  TaskStatus,
+  TurnMetrics
 } from '@shared/types'
 import {
   conversationRepo,
@@ -69,11 +71,33 @@ import {
   extractHandoff,
   hasDone,
   isAdapterNoise,
+  isContextOverflow,
   wrapDelegate,
   wrapExecutorReport,
   wrapTeamReport
 } from './transcript'
 import { applyUpdate } from './update-reducer'
+
+/** Fold an ACP PromptResponse + engine-measured wall-clock into our
+ *  TurnMetrics shape. `usage` is an experimental ACP field — absent on
+ *  adapters that don't report it, in which case we still keep durationMs.
+ *  Returns undefined only if there is genuinely nothing to record. */
+function buildTurnMetrics(
+  response: PromptResponse,
+  durationMs: number
+): TurnMetrics | undefined {
+  const usage = response.usage
+  const metrics: TurnMetrics = { durationMs }
+  if (usage) {
+    if (typeof usage.inputTokens === 'number') metrics.inputTokens = usage.inputTokens
+    if (typeof usage.outputTokens === 'number') metrics.outputTokens = usage.outputTokens
+    if (typeof usage.totalTokens === 'number') metrics.totalTokens = usage.totalTokens
+    if (typeof usage.cachedReadTokens === 'number') {
+      metrics.cachedTokens = usage.cachedReadTokens
+    }
+  }
+  return metrics
+}
 
 // --- Engine internals ------------------------------------------------------
 
@@ -83,7 +107,7 @@ export interface EngineEvents {
   'message-patched': (payload: {
     conversationId: string
     messageId: string
-    patch: Partial<Pick<Message, 'blocks' | 'stopReason'>>
+    patch: Partial<Pick<Message, 'blocks' | 'stopReason' | 'metrics'>>
   }) => void
 }
 
@@ -116,6 +140,10 @@ interface ActiveConversation {
    *  this hits 2 we stop nudging and idle, so a stuck agent can't burn
    *  through the autoTurns cap on its own. Reset on any forward transition. */
   stallNudges: number
+  /** Set when we've already re-prompted the PM once because it returned an
+   *  empty turn in response to a DONE/FAIL [团队反馈]. Bounds the forced
+   *  wrap-up to a single retry so an idle PM can't loop. */
+  pmReportRetried: boolean
 }
 
 export class ConversationEngine extends EventEmitter {
@@ -323,7 +351,8 @@ export class ConversationEngine extends EventEmitter {
         systemPromptSent: false,
         inFlight: Promise.resolve()
       },
-      stallNudges: 0
+      stallNudges: 0,
+      pmReportRetried: false
     }
     this.active.set(conv.id, slot)
 
@@ -396,6 +425,7 @@ export class ConversationEngine extends EventEmitter {
     // User intervention breaks any stall — the next agent turn gets a
     // fresh budget of nudges before we idle on it again.
     slot.stallNudges = 0
+    slot.pmReportRetried = false
 
     // NOTE: we deliberately do NOT reset autoTurnsUsed here. The cap exists
     // to bound a single autopilot cascade — a chatty user shouldn't be able
@@ -579,6 +609,152 @@ export class ConversationEngine extends EventEmitter {
    * Image attachments are passed straight through as ACP `image` blocks
    * (separate from the text payload).
    */
+  /**
+   * Call the side's ACP runtime, auto-retrying when the adapter dies under us.
+   *
+   * The runtime resets its conn/session to null on a mid-turn adapter exit, so
+   * the next prompt() respawns a fresh process (restoring context via
+   * loadSession when the agent supports it). We lean on that here: a transient
+   * crash / stream disconnect becomes a silent retry instead of dumping the
+   * whole autopilot cascade to `awaiting-user`. This is the core of "全自动" —
+   * the user shouldn't have to re-send a turn because a socket hiccuped.
+   *
+   * We DON'T retry when:
+   *   • we no longer own the side (a newer turn replaced us — preemption)
+   *   • the conversation was disposed mid-flight
+   *   • the error is a dispose signal
+   *   • we've exhausted MAX_PROMPT_RETRIES
+   * — in those cases we rethrow and the caller's catch handles it as before.
+   *
+   * Before each retry we wipe the in-flight assistant bubble back to empty so
+   * the respawned adapter streams into a clean slate rather than appending
+   * after the crashed attempt's partial blocks.
+   */
+  private async promptWithRetry(
+    slot: ActiveConversation,
+    sr: SideRuntime,
+    side: Role,
+    blocks: ContentBlock[],
+    assistantMessageId: string,
+    /** Build a fresh-session prompt (system + compaction summary + payload)
+     *  used to recover from a context-overflow exactly once. */
+    onCompact: () => ContentBlock[]
+  ): Promise<PromptResponse> {
+    const MAX_PROMPT_RETRIES = 2
+    let attempt = 0
+    let compacted = false
+    let currentBlocks = blocks
+    for (;;) {
+      try {
+        const r = await sr.runtime.prompt(currentBlocks)
+        // A successful compacted turn means the fresh session has now
+        // received the system prompt — record that so the next turn doesn't
+        // needlessly re-inject it.
+        if (compacted) sr.systemPromptSent = true
+        return r
+      } catch (err) {
+        const msg = (err as Error).message
+        const stillOwnsSide = sr.streamingMessageId === assistantMessageId
+        const convGone = !this.active.has(slot.conversation.id)
+
+        // Context overflow: the adapter's session history is past the model's
+        // limit. Retrying the same prompt is hopeless — instead abandon the
+        // session and reseed a FRESH one with a CloXde-built summary, then try
+        // once more. Bounded to a single compaction per turn so a pathological
+        // summary can't loop. This is what lets "全自动" survive long runs
+        // without the user having to open a new conversation.
+        if (isContextOverflow(msg)) {
+          if (compacted || !stillOwnsSide || convGone) throw err
+          compacted = true
+          await sr.runtime.restartFresh()
+          currentBlocks = onCompact()
+          sr.toolBlockIndex.clear()
+          if (sr.streamingMessage) {
+            sr.streamingMessage = { ...sr.streamingMessage, blocks: [] }
+          }
+          this.patchMessage(slot.conversation.id, assistantMessageId, { blocks: [] })
+          this.recordSystemMessage(
+            slot,
+            `[${side}] 上下文超出模型上限，已自动压缩历史并在新会话中续跑。`
+          )
+          continue
+        }
+
+        const fatal =
+          attempt >= MAX_PROMPT_RETRIES ||
+          !stillOwnsSide ||
+          convGone ||
+          /disposed/i.test(msg)
+        if (fatal) throw err
+        attempt += 1
+        // Reset the assistant bubble to a clean slate for the retry.
+        sr.toolBlockIndex.clear()
+        if (sr.streamingMessage) {
+          sr.streamingMessage = { ...sr.streamingMessage, blocks: [] }
+        }
+        this.patchMessage(slot.conversation.id, assistantMessageId, { blocks: [] })
+        this.recordSystemMessage(
+          slot,
+          `[${side}] 适配器中断（${condenseError(msg)}），正在自动重试（${attempt}/${MAX_PROMPT_RETRIES}）…`
+        )
+        await new Promise((resolve) => setTimeout(resolve, 400 * attempt))
+      }
+    }
+  }
+
+  /** Build a plain-text summary of one side's history for context compaction.
+   *  The agent's own ACP session has overflowed, so rather than replay the
+   *  full (too-long) transcript into a fresh session we hand it this digest,
+   *  sourced entirely from CloXde's DB — task state + the side's most recent
+   *  turns, char-budgeted newest-first. No model call, so it always succeeds. */
+  private buildCompactionSummary(slot: ActiveConversation, side: Role): string {
+    const conv = slot.conversation
+    const lines: string[] = [
+      '**CloXde 上下文压缩摘要**',
+      '（此前会话历史过长，已被自动压缩。以下是摘要——请据此继续，不要假设还能看到更早的原文。）'
+    ]
+
+    if (conv.inheritedSummary && conv.inheritedSummary.trim()) {
+      lines.push('', '[继承上下文]', conv.inheritedSummary.trim().slice(0, 2000))
+    }
+
+    const task = conv.activeTaskId ? taskRepo.get(conv.activeTaskId) : null
+    if (task) {
+      lines.push('', '[当前任务]', `状态: ${task.status}`)
+      if (task.brief?.trim()) lines.push(`brief: ${task.brief.trim().slice(0, 1500)}`)
+      if (task.plan && task.plan.length > 0) {
+        lines.push('计划:')
+        for (const s of task.plan) lines.push(`  - [${s.status}] ${s.description}`)
+      }
+      if (task.result?.trim()) lines.push(`最近结果: ${task.result.trim().slice(0, 1500)}`)
+      if (task.failureReason?.trim()) {
+        lines.push(`失败原因: ${task.failureReason.trim().slice(0, 1000)}`)
+      }
+    }
+
+    // Most recent turns on THIS side, oldest-first in the output but selected
+    // newest-first against a char budget so we keep the freshest context.
+    const mine = messageRepo
+      .listByConversation(conv.id)
+      .filter((m) => m.side === side && (m.role === 'user' || m.role === 'assistant'))
+    const recent: string[] = []
+    let budget = 6000
+    for (let i = mine.length - 1; i >= 0 && budget > 0; i--) {
+      const text = blocksToPlainText(mine[i].blocks)
+      if (!text.trim()) continue
+      const who = mine[i].role === 'user' ? '收到' : side
+      let chunk = `${who}: ${text.trim()}`
+      if (chunk.length > 1000) chunk = chunk.slice(0, 1000) + '…'
+      budget -= chunk.length
+      recent.unshift(chunk)
+    }
+    if (recent.length > 0) lines.push('', '[最近若干轮要点]', ...recent)
+
+    return lines.join('\n')
+  }
+
+
+
   private async runTurnImpl(
     slot: ActiveConversation,
     sr: SideRuntime,
@@ -662,8 +838,32 @@ export class ConversationEngine extends EventEmitter {
     this.updateConversation(slot, { status: 'thinking' })
     this.emitSnapshot(slot)
 
+    const startedAt = Date.now()
     try {
-      const response = await sr.runtime.prompt(blocks)
+      // On context overflow promptWithRetry abandons the adapter session and
+      // reseeds a fresh one. The fresh session has NO history, so the recovery
+      // prompt must re-inject the system prompt + a CloXde-built summary in
+      // place of the (too-long) inherited summary, then the same payload.
+      const onCompact = (): ContentBlock[] => {
+        const text = buildFirstTurnPrompt(
+          side,
+          this.buildCompactionSummary(slot, side),
+          preamble + payloadText
+        )
+        const out: ContentBlock[] = [{ type: 'text', text }]
+        for (const a of attachments) {
+          out.push({ type: 'image', data: a.data, mimeType: a.mimeType })
+        }
+        return out
+      }
+      const response = await this.promptWithRetry(
+        slot,
+        sr,
+        side,
+        blocks,
+        assistantMessage.id,
+        onCompact
+      )
       // Prompt round-tripped successfully — system prompt has been
       // received by the adapter. Flip the flag now so we don't re-send
       // it on the next turn. (If we flipped before await and the prompt
@@ -681,7 +881,8 @@ export class ConversationEngine extends EventEmitter {
       // here would defeat the F5 optimization (one O(N) hit per turn).
       const finalBlocks = sr.streamingMessage?.blocks ?? assistantMessage.blocks
       this.patchMessage(slot.conversation.id, assistantMessage.id, {
-        stopReason: response.stopReason
+        stopReason: response.stopReason,
+        metrics: buildTurnMetrics(response, Date.now() - startedAt)
       })
       if (stillOwnsSide) {
         sr.streamingMessageId = null
@@ -782,9 +983,39 @@ export class ConversationEngine extends EventEmitter {
         // clear activeTaskId on terminal transitions).
         const handoff = extractHandoff(finalText)
         if (!handoff) {
+          // PM produced no further HANDOFF. Normally a clean stop — PM wrote
+          // its reply / wrap-up, then idles. BUT if the PM was just handed a
+          // DONE/FAIL [团队反馈] (origin='team-report') and returned an EMPTY
+          // turn, it "空转": the architect's conclusion is sitting in the
+          // forwarded [团队反馈] block, yet the PM emits no 收尾汇报 of its
+          // own, so the run looks dead ("架构师完成后就没下文"). Force one
+          // wrap-up turn; if that's also empty, surface a fallback system
+          // message so the conclusion is never silently swallowed.
+          if (opts.origin === 'team-report' && !finalText.trim()) {
+            if (!slot.pmReportRetried) {
+              slot.pmReportRetried = true
+              if (overCap()) return
+              bump()
+              dispatch(
+                'pm',
+                '请基于上面的[团队反馈]，面向用户写一段收尾说明：本轮完成或卡在了什么、当前结论、以及用户接下来需要做什么。不要只字未回。',
+                'team-report'
+              )
+              return
+            }
+            slot.pmReportRetried = false
+            this.recordSystemMessage(
+              slot,
+              '团队已结束本轮任务（结论见上方[团队反馈]），但产品经理连续两轮未给出收尾说明。'
+            )
+            this.updateConversation(slot, { status: 'awaiting-user' })
+            return
+          }
+          slot.pmReportRetried = false
           this.updateConversation(slot, { status: 'awaiting-user' })
           return
         }
+        slot.pmReportRetried = false
         if (overCap()) return
         const newTask = taskRepo.create({
           conversationId: slot.conversation.id,
@@ -857,7 +1088,14 @@ export class ConversationEngine extends EventEmitter {
       if (!isAdapterNoise(errMsg) && stillOwnsSide) {
         // Don't surface errors from a preempted turn — the new turn is
         // already what the user is watching.
-        this.recordSystemMessage(slot, `[${side}] ${condenseError(errMsg)}`)
+        if (isContextOverflow(errMsg)) {
+          this.recordSystemMessage(
+            slot,
+            `[${side}] 上下文已超出模型上限，本轮无法继续。该 agent 会话历史过长——建议新开一个会话（可在新建时勾选继承摘要），或精简任务范围后重试。`
+          )
+        } else {
+          this.recordSystemMessage(slot, `[${side}] ${condenseError(errMsg)}`)
+        }
       }
       if (stillOwnsSide) {
         this.updateConversation(slot, { status: 'awaiting-user' })
@@ -927,11 +1165,17 @@ export class ConversationEngine extends EventEmitter {
         await this.startFreshTask(slot, found.body, dispatch, bump, overCap)
         return
       }
-      this.recordSystemMessage(
+      this.nudgeProtocolSlip(
         slot,
-        `[${side}] <<${found.action}>> 在 status=${task.status} 不合法，引擎暂停。`
+        side,
+        `上一轮的 <<${found.action}>> 在当前阶段（status=${task.status}）不合法。允许的动作：${allowed
+          .map((a) => `<<${a}>>`)
+          .join(' / ')}。请改用其中之一在本轮**末尾**收尾。`,
+        `[${side}] <<${found.action}>> 在 status=${task.status} 连续不合法，引擎暂停等待用户介入。`,
+        dispatch,
+        bump,
+        overCap
       )
-      this.updateConversation(slot, { status: 'awaiting-user' })
       return
     }
 
@@ -943,11 +1187,15 @@ export class ConversationEngine extends EventEmitter {
         found.action === 'REPORT') &&
       !found.body.trim()
     ) {
-      this.recordSystemMessage(
+      this.nudgeProtocolSlip(
         slot,
-        `[${side}] <<${found.action}>> 内容为空，已忽略。请补全后重发。`
+        side,
+        `上一轮的 <<${found.action}>> 正文为空，无法转交给下一棒。请补全 <<${found.action}>>……<</${found.action}>> 之间的内容后，在本轮**末尾**重发。`,
+        `[${side}] <<${found.action}>> 连续内容为空，引擎暂停等待用户介入。`,
+        dispatch,
+        bump,
+        overCap
       )
-      this.updateConversation(slot, { status: 'awaiting-user' })
       return
     }
 
@@ -1043,20 +1291,38 @@ export class ConversationEngine extends EventEmitter {
       case 'DONE':
         if (slot.pm) {
           bump()
-          dispatch('pm', wrapTeamReport(found.body), 'team-report')
+          // Forward the architect's conclusion. Prefer the tag body, but
+          // fall back to the full turn text: the DONE close-tag is OPTIONAL
+          // (see TAG_PATTERNS), so a bare `<<DONE>>` with the conclusion
+          // written *after* it yields an empty `found.body` — without this
+          // fallback the PM would receive an empty [团队反馈] and have nothing
+          // to wrap up. Mirrors the legacy path which forwards finalText.
+          dispatch('pm', wrapTeamReport(found.body || finalText), 'team-report')
         } else {
           this.recordSystemMessage(slot, '架构师宣告任务完成（<<DONE>>）。')
           this.updateConversation(slot, { status: 'ended', endedAt: Date.now() })
         }
         break
       case 'FAIL':
-        if (slot.pm) {
-          bump()
-          dispatch('pm', `[团队反馈]\n任务失败：${found.body}`, 'team-report')
-        } else {
-          this.recordSystemMessage(slot, `任务失败：${found.body}`)
-          this.updateConversation(slot, { status: 'awaiting-user' })
-        }
+        // driveStateMachine is only entered under `slot.pm && activeTask`
+        // (see runTurnImpl), so the PM always exists here. Hand the failure
+        // up to the PM and bias it toward an automatic retry: the PM is the
+        // decision-maker, so rather than mechanically replanning we let it
+        // judge retryability — but we tell it that retrying is on the table so
+        // it doesn't reflexively stop and ask the user. The engine itself
+        // doesn't halt on FAIL; whether the cascade continues is the PM's call.
+        bump()
+        dispatch(
+          'pm',
+          [
+            '[团队反馈]',
+            `任务失败：${found.body || finalText}`,
+            '',
+            '如果你判断换一种思路有机会解决，直接发 <<HANDOFF>>……<</HANDOFF>> 重新派活继续推进；',
+            '只有在确实卡住、需要用户决策时才停下来向用户说明。'
+          ].join('\n'),
+          'team-report'
+        )
         break
     }
     this.emitSnapshot(slot)
@@ -1126,6 +1392,46 @@ export class ConversationEngine extends EventEmitter {
         new Promise<void>((resolve) => setTimeout(resolve, 1500))
       ])
     }
+  }
+
+  /** A team agent produced a recognizable but unusable turn — a tag that's
+   *  illegal in the current state, or a tag whose payload is empty. Rather
+   *  than halting on the first slip, re-ping the SAME side once with a
+   *  corrective reminder and idle only if it slips again. Shares the
+   *  stallNudges budget with handleNoTag, so a side that alternates between
+   *  different kinds of slips still can't loop forever. PM slips just idle —
+   *  PM is allowed to free-chat, so there's nothing to correct. */
+  private nudgeProtocolSlip(
+    slot: ActiveConversation,
+    side: Role,
+    reminder: string,
+    haltMessage: string,
+    dispatch: (
+      toSide: Role,
+      body: string,
+      nextOrigin: 'pm-handoff' | 'team-report' | 'peer-delegate' | 'peer-report'
+    ) => void,
+    bump: () => void,
+    overCap: () => boolean
+  ): void {
+    if (side === 'pm') {
+      this.recordSystemMessage(slot, haltMessage)
+      this.updateConversation(slot, { status: 'awaiting-user' })
+      return
+    }
+    slot.stallNudges += 1
+    if (slot.stallNudges > 1) {
+      this.recordSystemMessage(slot, haltMessage)
+      this.updateConversation(slot, { status: 'awaiting-user' })
+      return
+    }
+    if (overCap()) return
+    bump()
+    dispatch(
+      side === 'architect' ? 'architect' : 'executor',
+      reminder,
+      side === 'architect' ? 'pm-handoff' : 'peer-delegate'
+    )
   }
 
   /** Agent's turn produced no tag the state machine recognizes. PM is
@@ -1202,7 +1508,7 @@ export class ConversationEngine extends EventEmitter {
   private patchMessage(
     conversationId: string,
     messageId: string,
-    patch: Partial<Pick<Message, 'blocks' | 'stopReason'>>
+    patch: Partial<Pick<Message, 'blocks' | 'stopReason' | 'metrics'>>
   ): void {
     messageRepo.patch(messageId, patch)
     this.emit('message-patched', { conversationId, messageId, patch })

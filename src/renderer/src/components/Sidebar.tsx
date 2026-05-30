@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Conversation, Project } from '@shared/types'
+import type { Conversation, ConversationStatus, Project } from '@shared/types'
 import { TwoClickButton } from './TwoClickButton'
 
 interface SidebarProps {
@@ -36,6 +36,8 @@ export function Sidebar({
   versionLabel
 }: SidebarProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<ConversationStatus | 'all'>('all')
 
   const toggle = (id: string): void => {
     setCollapsed((c) => {
@@ -46,6 +48,18 @@ export function Sidebar({
     })
   }
 
+  const q = query.trim().toLowerCase()
+  const filterActive = q.length > 0 || statusFilter !== 'all'
+  const filterConvs = (convs: Conversation[]): Conversation[] =>
+    convs.filter((c) => {
+      if (statusFilter !== 'all' && c.status !== statusFilter) return false
+      if (q && !(c.title ?? c.id).toLowerCase().includes(q)) return false
+      return true
+    })
+  const noMatches =
+    filterActive &&
+    projects.every((p) => filterConvs(conversationsByProject[p.id] ?? []).length === 0)
+
   return (
     <aside className="sidebar">
       <div className="section">
@@ -54,14 +68,45 @@ export function Sidebar({
           + 新建项目
         </button>
       </div>
+      {projects.length > 0 && (
+        <div className="sidebar-filter">
+          <input
+            className="sidebar-search"
+            type="text"
+            placeholder="搜索会话…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <div className="sidebar-status-chips">
+            {(
+              [
+                ['all', '全部'],
+                ['awaiting-user', '等待'],
+                ['thinking', '进行中'],
+                ['idle', '空闲']
+              ] as Array<[ConversationStatus | 'all', string]>
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                className={`status-chip ${statusFilter === value ? 'active' : ''}`}
+                onClick={() => setStatusFilter(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="project-list">
         {projects.length === 0 && (
           <div className="sidebar-empty">暂无项目</div>
         )}
+        {noMatches && <div className="sidebar-empty">无匹配会话</div>}
         {projects.map((p) => {
           const isActive = p.id === activeProjectId
-          const isCollapsed = collapsed.has(p.id) && !isActive
-          const convs = conversationsByProject[p.id] ?? []
+          const isCollapsed = filterActive ? false : collapsed.has(p.id) && !isActive
+          const convs = filterConvs(conversationsByProject[p.id] ?? [])
+          if (filterActive && convs.length === 0) return null
           const archivedCount = (archivedByProject[p.id] ?? []).length
           return (
             <div key={p.id}>

@@ -15,7 +15,7 @@ import React, { memo, useMemo, useState } from 'react'
 import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native'
 import Markdown from 'react-native-markdown-display'
 import type { Message, MessageBlock, MessageSide } from '../types'
-import { colors, fontSizes, radius, spacing } from '../utils/theme'
+import { colors, radius, spacing } from '../utils/theme'
 
 interface Props {
   message: Message
