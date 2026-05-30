@@ -585,7 +585,7 @@ export class ConversationEngine extends EventEmitter {
     const sr = this.getSide(slot, side)
     if (!sr) {
       this.recordSystemMessage(slot, `运行配置错误：缺少 ${side} runtime`)
-      this.updateConversation(slot, { status: 'awaiting-user' })
+      this.settleStatus(slot)
       return Promise.resolve()
     }
     const next = sr.inFlight.then(() =>
@@ -897,7 +897,7 @@ export class ConversationEngine extends EventEmitter {
         // moved on without us, and applying a stale transition would
         // corrupt it.
         if (stillOwnsSide) {
-          this.updateConversation(slot, { status: 'awaiting-user' })
+          this.settleStatus(slot)
         }
         return
       }
@@ -908,7 +908,7 @@ export class ConversationEngine extends EventEmitter {
       slot.conversation = conv
 
       if (!conv.autopilot) {
-        this.updateConversation(slot, { status: 'awaiting-user' })
+        this.settleStatus(slot)
         return
       }
 
@@ -922,7 +922,7 @@ export class ConversationEngine extends EventEmitter {
           slot,
           `已达到自动接力上限（${c.maxAutoTurns}），暂停。请用户介入。`
         )
-        this.updateConversation(slot, { status: 'awaiting-user' })
+        this.settleStatus(slot)
         return true
       }
       const bump = (): void => {
@@ -1008,11 +1008,11 @@ export class ConversationEngine extends EventEmitter {
               slot,
               '团队已结束本轮任务（结论见上方[团队反馈]），但产品经理连续两轮未给出收尾说明。'
             )
-            this.updateConversation(slot, { status: 'awaiting-user' })
+            this.settleStatus(slot)
             return
           }
           slot.pmReportRetried = false
-          this.updateConversation(slot, { status: 'awaiting-user' })
+          this.settleStatus(slot)
           return
         }
         slot.pmReportRetried = false
@@ -1055,7 +1055,7 @@ export class ConversationEngine extends EventEmitter {
             dispatch('pm', wrapTeamReport(finalText), 'team-report')
             return
           }
-          this.updateConversation(slot, { status: 'awaiting-user' })
+          this.settleStatus(slot)
           return
         }
         if (overCap()) return
@@ -1067,7 +1067,7 @@ export class ConversationEngine extends EventEmitter {
       // side === 'executor' — always reports to architect.
       if (overCap()) return
       if (!finalText.trim()) {
-        this.updateConversation(slot, { status: 'awaiting-user' })
+        this.settleStatus(slot)
         return
       }
       bump()
@@ -1098,7 +1098,7 @@ export class ConversationEngine extends EventEmitter {
         }
       }
       if (stillOwnsSide) {
-        this.updateConversation(slot, { status: 'awaiting-user' })
+        this.settleStatus(slot)
       }
     }
   }
@@ -1143,7 +1143,7 @@ export class ConversationEngine extends EventEmitter {
     if (allowed.length === 0) {
       // This side wasn't supposed to be acting at all — stale turn fired
       // after a state change. Don't escalate the stall counter; just idle.
-      this.updateConversation(slot, { status: 'awaiting-user' })
+      this.settleStatus(slot)
       return
     }
     const found = extractAction(finalText, allowed)
@@ -1270,7 +1270,7 @@ export class ConversationEngine extends EventEmitter {
             slot,
             '架构师连续 PLAN 未派单，引擎暂停等待用户介入。'
           )
-          this.updateConversation(slot, { status: 'awaiting-user' })
+          this.settleStatus(slot)
           break
         }
         bump()
@@ -1343,7 +1343,7 @@ export class ConversationEngine extends EventEmitter {
   ): Promise<void> {
     if (!brief.trim()) {
       this.recordSystemMessage(slot, '[pm] <<HANDOFF>> 内容为空，已忽略。')
-      this.updateConversation(slot, { status: 'awaiting-user' })
+      this.settleStatus(slot)
       return
     }
     if (overCap()) return
@@ -1416,13 +1416,13 @@ export class ConversationEngine extends EventEmitter {
   ): void {
     if (side === 'pm') {
       this.recordSystemMessage(slot, haltMessage)
-      this.updateConversation(slot, { status: 'awaiting-user' })
+      this.settleStatus(slot)
       return
     }
     slot.stallNudges += 1
     if (slot.stallNudges > 1) {
       this.recordSystemMessage(slot, haltMessage)
-      this.updateConversation(slot, { status: 'awaiting-user' })
+      this.settleStatus(slot)
       return
     }
     if (overCap()) return
@@ -1450,7 +1450,7 @@ export class ConversationEngine extends EventEmitter {
     overCap: () => boolean
   ): void {
     if (side === 'pm') {
-      this.updateConversation(slot, { status: 'awaiting-user' })
+      this.settleStatus(slot)
       return
     }
     slot.stallNudges += 1
@@ -1461,7 +1461,7 @@ export class ConversationEngine extends EventEmitter {
           .map((a) => `<<${a}>>`)
           .join(' / ')}），引擎暂停等待用户介入。`
       )
-      this.updateConversation(slot, { status: 'awaiting-user' })
+      this.settleStatus(slot)
       return
     }
     if (overCap()) return
@@ -1532,6 +1532,21 @@ export class ConversationEngine extends EventEmitter {
     const fresh = conversationRepo.get(slot.conversation.id)
     if (fresh) slot.conversation = fresh
     this.emitSnapshot(slot)
+  }
+
+  /** Settle the conversation status after one side goes idle. A conversation
+   *  has a single `status` but up to three concurrent sides (PM / architect /
+   *  executor): the PM can be free-chatting while the team cascade is still
+   *  streaming, and vice versa. Blindly writing `awaiting-user` whenever any
+   *  one side finishes would falsely mark the whole conversation idle while
+   *  another side is mid-turn. So check every side first: stay `thinking` as
+   *  long as anyone still owns a streaming message, and only fall to
+   *  `awaiting-user` once they're all quiet. The just-finished side has already
+   *  cleared its own streamingMessageId before reaching any settle site, so it
+   *  never counts itself as busy here. */
+  private settleStatus(slot: ActiveConversation): void {
+    const busy = this.allSides(slot).some((sr) => sr.streamingMessageId)
+    this.updateConversation(slot, { status: busy ? 'thinking' : 'awaiting-user' })
   }
 
   /** Re-emit a ConversationView snapshot — picks up busySide for the renderer
