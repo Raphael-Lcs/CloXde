@@ -48,8 +48,10 @@ function userFacingMode(message: Message): UserFacingMode {
 // Internal CloXde协议 tags that drive the PM/architect/executor hand-offs.
 // They're plumbing, not prose — strip them out of the text the user sees so
 // the PM's 小结 reads cleanly instead of leaking `<<HANDOFF>>…` markers.
+// 闭合标签可选：与 state-machine 的解析保持一致——LLM 常只发开标签就接正文，
+// 此时正文取到下一个标签或文本结尾，避免未闭合标签残留到界面。
 const PROTOCOL_TAG_RE =
-  /<<(HANDOFF|DELEGATE|REPORT|PLAN|FAIL)>>[\s\S]*?<<\/\1>>|<<DONE>>/gi
+  /<<(HANDOFF|DELEGATE|REPORT|PLAN|FAIL)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)|<<DONE>>/gi
 
 function stripProtocolTags(text: string): string {
   return text.replace(PROTOCOL_TAG_RE, '').replace(/\n{3,}/g, '\n\n').trim()

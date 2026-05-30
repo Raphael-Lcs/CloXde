@@ -181,13 +181,22 @@ export function transition(task: Task, action: TaskAction): Transition | null {
 
 // --- Tag parser ------------------------------------------------------------
 
+// 闭合标签是可选的：实测 LLM 常常只发开标签 `<<DELEGATE>>` 就接正文，忘了补
+// `<</DELEGATE>>`。早期严格要求闭合会让整条动作匹配失败，于是架构师明明派活了，
+// 引擎却当成「没发标签」连续两轮空转后暂停（用户报告的 bug）。
+// 因此正文取到下一个标签（开或闭）之前、或文本结尾为止。闭合标签存在时因惰性量词
+// 优先匹配，正文边界仍然精确。
+function tagPattern(tag: string): RegExp {
+  return new RegExp(`<<${tag}>>([\\s\\S]*?)(?:<<\\/${tag}>>|(?=<<\\/?[A-Za-z])|$)`, 'i')
+}
+
 const TAG_PATTERNS: Record<TaskAction, RegExp> = {
-  PLAN: /<<PLAN>>([\s\S]*?)<<\/PLAN>>/i,
-  DELEGATE: /<<DELEGATE>>([\s\S]*?)<<\/DELEGATE>>/i,
-  REPORT: /<<REPORT>>([\s\S]*?)<<\/REPORT>>/i,
-  DONE: /<<DONE>>(?:([\s\S]*?)<<\/DONE>>)?/i,
-  FAIL: /<<FAIL>>([\s\S]*?)<<\/FAIL>>/i,
-  HANDOFF: /<<HANDOFF>>([\s\S]*?)<<\/HANDOFF>>/i
+  PLAN: tagPattern('PLAN'),
+  DELEGATE: tagPattern('DELEGATE'),
+  REPORT: tagPattern('REPORT'),
+  DONE: tagPattern('DONE'),
+  FAIL: tagPattern('FAIL'),
+  HANDOFF: tagPattern('HANDOFF')
 }
 
 export interface ExtractedAction {

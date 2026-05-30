@@ -235,6 +235,26 @@ eq(
 )
 
 // -------------------------------------------------------------------------
+// 闭合标签可选：实测 LLM 常只发开标签就接正文。早期严格要求闭合会让架构师明明
+// 派活了却被当成「没发标签」，连续空转后暂停（用户报告的 bug）。
+section('extractAction — 缺失闭合标签')
+eq(
+  extractAction('好的，我现在派单 <<DELEGATE>>请实现登录功能并补测试', ['PLAN', 'DELEGATE', 'FAIL']),
+  { action: 'DELEGATE', body: '请实现登录功能并补测试' },
+  'unclosed DELEGATE -> body extends to end of text'
+)
+eq(
+  extractAction('<<PLAN>>\n- 第一步\n- 第二步\n<</PLAN>>\n现在派单 <<DELEGATE>>执行第一步', ['PLAN', 'DELEGATE']),
+  { action: 'DELEGATE', body: '执行第一步' },
+  'closed PLAN + unclosed DELEGATE -> DELEGATE wins, body to end'
+)
+eq(
+  extractAction('<<PLAN>>计划正文没有闭合', ['PLAN', 'DELEGATE']),
+  { action: 'PLAN', body: '计划正文没有闭合' },
+  'unclosed PLAN -> body to end'
+)
+
+// -------------------------------------------------------------------------
 section('parsePlanSteps — dash bullets')
 eq(
   parsePlanSteps('- step one\n- step two\n- step three'),

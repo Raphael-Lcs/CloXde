@@ -1214,7 +1214,7 @@ export class ConversationEngine extends EventEmitter {
         // turn ("here's the plan, do step 1"). extractAction picks the
         // LAST tag (DELEGATE) so PLAN would otherwise be lost. Scrape
         // it back out and persist if found.
-        const planMatch = /<<PLAN>>([\s\S]*?)<<\/PLAN>>/i.exec(finalText)
+        const planMatch = /<<PLAN>>([\s\S]*?)(?:<<\/PLAN>>|(?=<<\/?[A-Za-z])|$)/i.exec(finalText)
         if (planMatch) {
           const steps = parsePlanSteps(planMatch[1].trim())
           if (steps.length > 0) patches.plan = steps
