@@ -55,10 +55,18 @@ export function useConversation(conversationId: string): UseConversationResult {
   // Latest view ref so the loadEarlier closure doesn't capture stale state.
   const viewRef = useRef<ConversationView | null>(null)
   viewRef.current = view
+  // Latest conversationId. The screen is kept mounted across conversation
+  // switches (only route.params changes), so an HTTP fetch for the previous
+  // conversation can resolve AFTER we've switched — without this guard its
+  // setState would splice the old conversation's messages onto the new view.
+  const currentIdRef = useRef(conversationId)
+  currentIdRef.current = conversationId
 
   const reload = useCallback(async () => {
     try {
       const r = await convApi.get(conversationId, { limit: PAGE_SIZE })
+      // Bail if we've switched conversations while this fetch was in flight.
+      if (currentIdRef.current !== conversationId) return
       if (!r.ok) {
         setError(r.error)
         return
@@ -67,6 +75,7 @@ export function useConversation(conversationId: string): UseConversationResult {
       setView(r.data)
       setHasMore((r.data?.messages.length ?? 0) >= PAGE_SIZE)
     } catch (e) {
+      if (currentIdRef.current !== conversationId) return
       // Defensive — fetch() and JSON.parse() are wrapped already, but a
       // misbehaving polyfill (URLSearchParams etc.) can still surface here.
       // Show the error to the user rather than spinning forever.
@@ -96,6 +105,9 @@ export function useConversation(conversationId: string): UseConversationResult {
         limit: PAGE_SIZE,
         before: earliest.ts
       })
+      // Dropped if we switched conversations mid-fetch — otherwise we'd prepend
+      // the previous conversation's history onto the new one.
+      if (currentIdRef.current !== conversationId) return
       if (!r.ok || !r.data) return
       const older = r.data.messages
       setView((prev) =>

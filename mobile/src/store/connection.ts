@@ -3,11 +3,29 @@
 // react to pair / unpair, and `client` to make calls.
 
 import { create } from 'zustand'
+import { AppState, type AppStateStatus } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { setConnection, ws as wsClient } from '../api/client'
 import type { ServerConnection } from '../types'
 
 const STORAGE_KEY = '@cloxde/connection'
+
+// Foreground watchdog: when the OS suspends the app the WS socket can die
+// silently (half-open) without ever firing onclose, so on resume the tablet
+// would show "connected" while receiving nothing. Force a fresh reconnect on
+// every background→active transition. Wired once, lazily, on first hydrate.
+let appStateWired = false
+function wireAppStateReconnect(): void {
+  if (appStateWired) return
+  appStateWired = true
+  let prev: AppStateStatus = AppState.currentState
+  AppState.addEventListener('change', (next) => {
+    if (prev.match(/inactive|background/) && next === 'active') {
+      wsClient.reconnectNow()
+    }
+    prev = next
+  })
+}
 
 interface ConnectionState {
   conn: ServerConnection | null
@@ -27,6 +45,7 @@ export const useConnection = create<ConnectionState>((set) => ({
   wsConnected: false,
 
   hydrate: async () => {
+    wireAppStateReconnect()
     try {
       const raw = await AsyncStorage.getItem(STORAGE_KEY)
       if (raw) {

@@ -242,11 +242,17 @@ export type WsEvent =
 type Listener = (e: WsEvent) => void
 
 class WsClient {
+  private static readonly MIN_BACKOFF = 2_000
+  private static readonly MAX_BACKOFF = 30_000
   private ws: WebSocket | null = null
   private listeners: Set<Listener> = new Set()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private intentionallyClosed = false
   private connectedHandler: ((v: boolean) => void) | null = null
+  /** Current backoff delay (ms). Grows on each failed reconnect, resets to the
+   *  floor on a successful open. Capped so we keep retrying a downed desktop
+   *  forever without hammering it. */
+  private backoff = WsClient.MIN_BACKOFF
 
   /** Wire a global "connected?" callback, used by the connection store. */
   setConnectedHandler(cb: ((v: boolean) => void) | null): void {
@@ -262,9 +268,12 @@ class WsClient {
     const ws = new WebSocket(wsUrl)
     this.ws = ws
     ws.onopen = () => {
+      if (this.ws !== ws) return
+      this.backoff = WsClient.MIN_BACKOFF
       this.connectedHandler?.(true)
     }
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return
       try {
         const data = JSON.parse(String(ev.data)) as WsEvent
         for (const l of this.listeners) l(data)
@@ -273,13 +282,19 @@ class WsClient {
       }
     }
     ws.onclose = () => {
+      // Identity guard: a late close from a socket we've already replaced
+      // (foreground force-reconnect) must NOT null the live socket or schedule
+      // a duplicate reconnect.
+      if (this.ws !== ws) return
       this.ws = null
       this.connectedHandler?.(false)
       if (this.intentionallyClosed) return
-      // Backoff reconnect: 2s — keeps the tablet alive when the desktop
-      // briefly drops (laptop lid close / wifi flap).
+      // Capped exponential backoff — snappy for a brief wifi flap, but won't
+      // hammer a desktop that's been shut down.
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = setTimeout(() => this.connect(), 2_000)
+      const delay = this.backoff
+      this.backoff = Math.min(this.backoff * 2, WsClient.MAX_BACKOFF)
+      this.reconnectTimer = setTimeout(() => this.connect(), delay)
     }
     ws.onerror = () => {
       try {
@@ -290,12 +305,36 @@ class WsClient {
     }
   }
 
+  /** Force a fresh connection regardless of the current socket's reported
+   *  state. Used on app foreground: a socket that went half-open while the OS
+   *  suspended us can still report readyState===OPEN, so connect() alone would
+   *  early-return and we'd silently receive nothing. Tear down and reopen. */
+  reconnectNow(): void {
+    if (!getConnection()) return
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.backoff = WsClient.MIN_BACKOFF
+    const stale = this.ws
+    this.ws = null
+    if (stale) {
+      try {
+        stale.close()
+      } catch {
+        /* ignore */
+      }
+    }
+    this.connect()
+  }
+
   disconnect(): void {
     this.intentionallyClosed = true
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
+    this.backoff = WsClient.MIN_BACKOFF
     if (this.ws) {
       try {
         this.ws.close()

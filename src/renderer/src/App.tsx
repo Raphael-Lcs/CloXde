@@ -90,6 +90,17 @@ export function App(): JSX.Element {
   // Last-seen status per conversation, so we can detect *transitions* into
   // awaiting-user (vs. an already-waiting conv just being re-broadcast).
   const prevStatusRef = useRef<Record<string, ConversationStatus>>({})
+  // Pending toast auto-dismiss timers, tracked so we can clear them on unmount
+  // — otherwise a fired timer calls setToasts on an unmounted component.
+  const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
+
+  useEffect(
+    () => () => {
+      for (const h of toastTimersRef.current) clearTimeout(h)
+      toastTimersRef.current.clear()
+    },
+    []
+  )
 
   const { view: conversation } = useConversation(activeConvId)
   // Cross-client awareness — banner appears when a paired tablet is also
@@ -157,7 +168,11 @@ export function App(): JSX.Element {
         const title = view.title ?? `会话 ${view.id.slice(0, 6)}`
         setToasts((curr) => [...curr, { id, projectId: view.projectId, convId: view.id, title }])
         // Auto-dismiss after a while; the badge keeps the persistent signal.
-        setTimeout(() => setToasts((curr) => curr.filter((t) => t.id !== id)), 8000)
+        const handle = setTimeout(() => {
+          toastTimersRef.current.delete(handle)
+          setToasts((curr) => curr.filter((t) => t.id !== id))
+        }, 8000)
+        toastTimersRef.current.add(handle)
       }
     })
     return off

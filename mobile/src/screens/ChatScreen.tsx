@@ -114,7 +114,7 @@ export default function ChatScreen(): React.ReactElement {
   // sidebar (the user can still navigate via stack-back).
   const SHOW_SIDEBAR = width >= 900
 
-  const { view, loading, error, hasMore, loadingEarlier, loadEarlier, send, cancel, setAutopilot } =
+  const { view, loading, error, hasMore, loadingEarlier, loadEarlier, reload, send, cancel, setAutopilot } =
     useConversation(conversationId)
 
   // Cross-client awareness — banner appears when the desktop (or another
@@ -367,9 +367,14 @@ export default function ChatScreen(): React.ReactElement {
     return (
       <SafeAreaView style={styles.center}>
         <Text style={styles.error}>{error}</Text>
-        <TouchableOpacity onPress={() => nav.goBack()}>
-          <Text style={styles.errorBack}>返回</Text>
-        </TouchableOpacity>
+        <View style={styles.errorActions}>
+          <TouchableOpacity onPress={() => void reload()}>
+            <Text style={styles.errorRetry}>重试</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => nav.goBack()}>
+            <Text style={styles.errorBack}>返回</Text>
+          </TouchableOpacity>
+        </View>
       </SafeAreaView>
     )
   }
@@ -910,6 +915,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center'
   },
   error: { color: colors.danger, paddingHorizontal: spacing.xl, marginBottom: spacing.md },
+  errorActions: { flexDirection: 'row', gap: spacing.xl, alignItems: 'center' },
+  errorRetry: { color: colors.accent, fontSize: fontSizes.md, fontWeight: '600' },
   errorBack: { color: colors.accent, fontSize: fontSizes.md },
 
   header: {
