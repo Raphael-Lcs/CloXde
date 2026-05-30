@@ -8,7 +8,7 @@
 // streaming mirror before calling). Returns whether anything changed, so
 // the caller can skip a persist + emit when the update was a no-op.
 
-import type { SessionNotification } from '@agentclientprotocol/sdk'
+import type { SessionNotification, ToolCallContent } from '@agentclientprotocol/sdk'
 import type { MessageBlock, PlanEntry } from '@shared/types'
 
 export function applyUpdate(
@@ -32,7 +32,7 @@ export function applyUpdate(
     }
     case 'tool_call': {
       const idx = blocks.length
-      blocks.push({
+      const block: Extract<MessageBlock, { type: 'tool_call' }> = {
         type: 'tool_call',
         toolCallId: update.toolCallId,
         title: update.title ?? update.kind ?? 'tool',
@@ -40,28 +40,43 @@ export function applyUpdate(
         status: update.status ?? 'pending',
         locations: update.locations?.map((l) => l.path),
         rawInput: update.rawInput
-      })
+      }
+      // Output can already be present on create (rare, but spec-allowed). The
+      // standard carrier is `content`; `rawOutput` is a non-standard fallback.
+      const out = pickToolOutput(update.content, update.rawOutput)
+      if (out !== null) block.output = out
+      blocks.push(block)
       toolBlockIndex.set(update.toolCallId, idx)
       return true
     }
     case 'tool_call_update': {
-      const idx = toolBlockIndex.get(update.toolCallId)
-      if (idx !== undefined && blocks[idx]?.type === 'tool_call') {
-        const block = blocks[idx] as Extract<MessageBlock, { type: 'tool_call' }>
-        if (update.status) block.status = update.status
-        if (update.title) block.title = update.title
-        if (update.kind) block.kind = update.kind
-        if (update.locations) block.locations = update.locations.map((l) => l.path)
-        if (update.rawOutput !== undefined) {
-          const out =
-            typeof update.rawOutput === 'string'
-              ? update.rawOutput
-              : JSON.stringify(update.rawOutput).slice(0, 4000)
-          block.output = out
-        }
-        return true
+      let idx = toolBlockIndex.get(update.toolCallId)
+      // Lazy upsert: some adapters emit a tool_call_update without a preceding
+      // tool_call (or one arrives after we cleared the index on compaction).
+      // Treat an unknown id as a create so the call still surfaces and settles
+      // rather than being silently dropped — the update type carries every
+      // field create needs (title/kind/status are all optional there too).
+      if (idx === undefined || blocks[idx]?.type !== 'tool_call') {
+        idx = blocks.length
+        blocks.push({
+          type: 'tool_call',
+          toolCallId: update.toolCallId,
+          title: update.title ?? update.kind ?? 'tool',
+          kind: update.kind ?? 'other',
+          status: update.status ?? 'pending',
+          locations: update.locations?.map((l) => l.path),
+          rawInput: update.rawInput
+        })
+        toolBlockIndex.set(update.toolCallId, idx)
       }
-      return false
+      const block = blocks[idx] as Extract<MessageBlock, { type: 'tool_call' }>
+      if (update.status) block.status = update.status
+      if (update.title) block.title = update.title
+      if (update.kind) block.kind = update.kind
+      if (update.locations) block.locations = update.locations.map((l) => l.path)
+      const out = pickToolOutput(update.content, update.rawOutput)
+      if (out !== null) block.output = out
+      return true
     }
     case 'plan': {
       const planBlock: MessageBlock = {
@@ -76,4 +91,40 @@ export function applyUpdate(
     default:
       return false
   }
+}
+
+/** Pick a short, renderable output string for a tool call. Prefers the ACP
+ *  `content` array (the standard output carrier — text, file diffs, terminal
+ *  refs) and falls back to the non-standard `rawOutput`. Returns null when
+ *  there's nothing to show, so callers only overwrite an existing output when
+ *  we actually have new content. */
+function pickToolOutput(
+  content: ToolCallContent[] | null | undefined,
+  rawOutput: unknown
+): string | null {
+  const fromContent = extractToolContent(content)
+  if (fromContent !== null) return fromContent
+  if (rawOutput === undefined) return null
+  return clip(typeof rawOutput === 'string' ? rawOutput : JSON.stringify(rawOutput))
+}
+
+function extractToolContent(content: ToolCallContent[] | null | undefined): string | null {
+  if (!content || content.length === 0) return null
+  const parts: string[] = []
+  for (const c of content) {
+    if (c.type === 'content') {
+      const b = c.content
+      parts.push(b.type === 'text' ? b.text : `[${b.type}]`)
+    } else if (c.type === 'diff') {
+      parts.push(`--- ${c.path}\n${c.newText}`)
+    } else if (c.type === 'terminal') {
+      parts.push(`[terminal ${c.terminalId}]`)
+    }
+  }
+  const joined = parts.join('\n').trim()
+  return joined ? clip(joined) : null
+}
+
+function clip(s: string, max = 4000): string {
+  return s.length > max ? s.slice(0, max) + '…' : s
 }
