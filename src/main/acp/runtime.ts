@@ -112,6 +112,9 @@ export interface AcpRuntimeEvents {
 }
 
 export class AcpRuntime extends EventEmitter {
+  /** Upper bound on the spawn→initialize→session handshake. Generous on
+   *  purpose: only meant to break a permanently-wedged adapter. */
+  private static readonly INIT_TIMEOUT_MS = 60_000
   private process: ChildProcess | null = null
   private conn: ClientSideConnection | null = null
   private sessionId: string | null = null
@@ -248,6 +251,24 @@ export class AcpRuntime extends EventEmitter {
     const conn = new ClientSideConnection(() => client, stream)
     this.conn = conn
 
+    // Guard the JSON-RPC handshake with a timeout. A spawned-but-wedged adapter
+    // (hung Python binary, a build that never answers `initialize`) would
+    // otherwise leave `start()` awaiting forever — and since `prompt()` awaits
+    // `start()`, the side's turn hangs and the conversation is stuck "thinking"
+    // with no recovery. On timeout we throw so start() clears `this.starting`
+    // and the engine surfaces an error (→ awaiting-user); the child is killed
+    // in the catch so it doesn't linger as a zombie.
+    try {
+      await this.withInitTimeout(this.handshake(conn, cwd))
+    } catch (err) {
+      if (this.process === child && !child.killed) child.kill()
+      throw err
+    }
+  }
+
+  /** initialize → resume-or-create-session. Split out of bringUp so the whole
+   *  handshake can be raced against a single timeout. */
+  private async handshake(conn: ClientSideConnection, cwd: string): Promise<void> {
     const initResult = await conn.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {
@@ -295,6 +316,20 @@ export class AcpRuntime extends EventEmitter {
     this.opts.savedSessionId = this.sessionId
 
     this.opts.onSessionReady?.(this.sessionId, restored)
+  }
+
+  /** Race a handshake promise against a generous timeout. The window is wide
+   *  (cold-start spawns + first-run model downloads are legitimately slow) — it
+   *  exists only to break a truly wedged adapter, not to police latency. */
+  private withInitTimeout<T>(p: Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('adapter did not complete ACP handshake in time')),
+        AcpRuntime.INIT_TIMEOUT_MS
+      )
+    })
+    return Promise.race([p, timeout]).finally(() => clearTimeout(timer)) as Promise<T>
   }
 
   /** Send a user prompt and wait for the turn to settle. */
@@ -358,7 +393,17 @@ export class AcpRuntime extends EventEmitter {
     this.sessionId = null
     this.starting = null
     this.forceFresh = true
-    if (old && !old.killed) old.kill()
+    if (old) {
+      // Detach our handlers from the abandoned child BEFORE killing it. We've
+      // already nulled `this.process`, so the exit handler's `=== child` guard
+      // would skip its body anyway — but the stderr/exit/error listeners would
+      // otherwise stay bound to the dying process until it fully exits, and a
+      // late stderr flush would still log noise for a process we've moved on
+      // from. Dropping them now lets the old child + its closures be collected.
+      old.removeAllListeners()
+      old.stderr?.removeAllListeners()
+      if (!old.killed) old.kill()
+    }
   }
 
   /** Tear everything down. The graceful `cancel()` is raced against a short

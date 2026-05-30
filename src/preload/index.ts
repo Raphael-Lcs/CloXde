@@ -170,6 +170,7 @@ const api = {
         addresses: string[]
         primary: string
         pin: string
+        error: string | null
       }>
     > => ipcRenderer.invoke(IPC.ServerGetStatus),
     rotatePin: (): Promise<IpcResult<string>> => ipcRenderer.invoke(IPC.ServerRotatePin),

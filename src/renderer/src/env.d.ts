@@ -117,6 +117,7 @@ interface CloXdeApi {
         addresses: string[]
         primary: string
         pin: string
+        error: string | null
       }>
     >
     rotatePin: () => Promise<IpcResult<string>>

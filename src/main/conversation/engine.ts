@@ -463,9 +463,10 @@ export class ConversationEngine extends EventEmitter {
   async dispose(conversationId: string): Promise<void> {
     const slot = this.active.get(conversationId)
     if (!slot) return
-    if (slot.pm) await slot.pm.runtime.dispose()
-    await slot.architect.runtime.dispose()
-    await slot.executor.runtime.dispose()
+    // Tear down every side even if one throws — a rejected dispose() must not
+    // leave the other runtimes' child processes alive, nor skip the `active`
+    // cleanup below (which would strand the conversation as "active" forever).
+    await Promise.allSettled(this.allSides(slot).map((sr) => sr.runtime.dispose()))
     this.active.delete(conversationId)
   }
 

@@ -389,6 +389,7 @@ interface ServerStatus {
   addresses: string[]
   primary: string
   pin: string
+  error: string | null
 }
 
 function LanSection(): JSX.Element {
@@ -436,6 +437,12 @@ function LanSection(): JSX.Element {
   return (
     <div className="settings-pane">
       <h3 style={{ marginTop: 0 }}>平板互联</h3>
+      {!status.running ? (
+        <p style={{ color: 'var(--danger, #e5534b)', lineHeight: 1.6 }}>
+          互联服务未启动{status.error ? `：${status.error}` : ''}
+          。请检查端口是否被占用（可用 CLOXDE_LAN_PORT 环境变量换端口），重启应用后再试。
+        </p>
+      ) : null}
       <p style={{ color: 'var(--fg-dim)', lineHeight: 1.6 }}>
         手机或平板装上 CloXde Mobile App 后，在「连接桌面端」页面填入下列地址和 PIN
         即可配对。配对完成后会用 token 持续访问，无需每次输入 PIN。

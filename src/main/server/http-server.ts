@@ -79,6 +79,10 @@ interface ServerHandle {
 }
 
 let handle: ServerHandle | null = null
+/** Last fatal listen error (e.g. EADDRINUSE), surfaced via getServerStatus so
+ *  the renderer can explain why LAN access is unavailable instead of the app
+ *  silently having no companion server. */
+let lastError: string | null = null
 /** Open WS clients (already-authenticated). Used to fan out engine events. */
 const liveSockets = new Set<WebSocket>()
 
@@ -731,7 +735,24 @@ export function startHttpServer(port = DEFAULT_PORT): ServerHandle {
     })
   })
 
+  // A listen failure (almost always EADDRINUSE from a stale instance or a
+  // port clash) arrives as an async 'error' event, NOT a throw from listen().
+  // Without this handler that event is unhandled and crashes the whole main
+  // process. Instead, record it, tear down the half-built handle, and let the
+  // app run on without a companion server — getServerStatus() reports why.
+  http.on('error', (e: NodeJS.ErrnoException) => {
+    lastError = e.code === 'EADDRINUSE' ? `端口 ${port} 已被占用` : e.message
+    console.error('[server] listen error:', e.message)
+    handle = null
+    try {
+      wss.close()
+    } catch {
+      /* ignore */
+    }
+  })
+
   http.listen(port, '0.0.0.0', () => {
+    lastError = null
     const addrs = listLanAddresses()
     console.log(
       `[server] listening on 0.0.0.0:${port}; LAN URLs: ${addrs.map((a) => `http://${a}:${port}`).join(', ')}`
@@ -751,17 +772,34 @@ export function stopHttpServer(): Promise<void> {
     }
     const h = handle
     handle = null
+    // terminate() (not close()) — a graceful WS close handshake waits for the
+    // peer to ack, and a tablet that's asleep or off-network never will, which
+    // would keep http.close()'s callback pending. We're shutting down; drop
+    // them hard.
     for (const ws of liveSockets) {
       try {
-        ws.close()
+        ws.terminate()
       } catch {
         /* ignore */
       }
     }
     liveSockets.clear()
+    // Backstop: this runs on `before-quit`, so it must never wedge the quit.
+    // Even after terminating WS clients, a lingering keep-alive HTTP socket can
+    // keep http.close() from firing its callback. Force-drop remaining sockets,
+    // and race the whole teardown against a timeout so quit always proceeds.
+    let done = false
+    const finish = (): void => {
+      if (done) return
+      done = true
+      resolve()
+    }
     h.wss.close(() => {
-      h.http.close(() => resolve())
+      h.http.close(() => finish())
+      // closeAllConnections exists on Node 18.2+; guard for older runtimes.
+      h.http.closeAllConnections?.()
     })
+    setTimeout(finish, 2000)
   })
 }
 
@@ -772,12 +810,14 @@ export function getServerStatus(): {
   addresses: string[]
   primary: string
   pin: string
+  error: string | null
 } {
   return {
     running: handle !== null,
     port: handle?.port ?? DEFAULT_PORT,
     addresses: listLanAddresses(),
     primary: primaryLanAddress(),
-    pin: getPin()
+    pin: getPin(),
+    error: lastError
   }
 }
