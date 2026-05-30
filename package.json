@@ -5,6 +5,10 @@
   "description": "Local desktop console orchestrating Claude Code CLI and Codex CLI via ACP",
   "main": "out/main/index.js",
   "author": "CloXde",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
   "scripts": {
     "dev": "env -u ELECTRON_RUN_AS_NODE electron-vite dev",
     "build": "electron-vite build",
