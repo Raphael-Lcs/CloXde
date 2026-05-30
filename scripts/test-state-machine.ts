@@ -86,15 +86,16 @@ eq(classifyTool(undefined), 'other', 'undefined')
 eq(classifyTool('mcp_thinker'), 'other', 'unknown')
 
 // -------------------------------------------------------------------------
-section('isToolAllowed — PM never uses tools')
+section('isToolAllowed — PM 可只读、拒写/执行')
 const allCats = ['read', 'write', 'execute', 'other'] as const
 const allStatuses: TaskStatus[] = [
   'briefing', 'planning', 'executing', 'review', 'done', 'failed'
 ]
 for (const s of allStatuses) {
-  for (const c of allCats) {
-    eq(isToolAllowed(s, 'pm', c), false, `pm/${s}/${c} -> false`)
-  }
+  eq(isToolAllowed(s, 'pm', 'read'), true, `pm/${s}/read -> true（可只读调研）`)
+  eq(isToolAllowed(s, 'pm', 'other'), true, `pm/${s}/other -> true`)
+  eq(isToolAllowed(s, 'pm', 'write'), false, `pm/${s}/write -> false（不改仓库）`)
+  eq(isToolAllowed(s, 'pm', 'execute'), false, `pm/${s}/execute -> false（不跑命令）`)
 }
 
 section('isToolAllowed — briefing: nobody acts')

@@ -58,8 +58,10 @@ export function isToolAllowed(
   role: Role,
   category: ToolCategory
 ): boolean {
-  // PM never uses tools — its job is conversation, not action.
-  if (role === 'pm') return false
+  // PM 可以只读调研（Read/Grep/Glob 等），但不碰写/执行——保持「不动手改仓库」
+  // 这条边界。给 PM 只读能力是为了让「查一下某段代码」这类快反应问题就地解决，
+  // 不必为了纯调研也走完整 architect→executor 长链。
+  if (role === 'pm') return category === 'read' || category === 'other'
 
   switch (status) {
     case 'briefing':
@@ -109,7 +111,7 @@ export function allowedTags(status: TaskStatus, role: Role): TaskAction[] {
 /** Human-readable description of the forbidden side of the contract.
  *  Used in deny reasons returned to the agent so it learns what to do. */
 export function describeForbidden(status: TaskStatus, role: Role): string {
-  if (role === 'pm') return '产品经理不应该调用工具。'
+  if (role === 'pm') return '产品经理可以只读调研（Read/Grep/Glob），但不写文件、不跑命令。要落地改动请发 <<HANDOFF>> 交给工程团队。'
   switch (status) {
     case 'briefing':
       return '当前阶段是 briefing（PM 还在跟用户对齐需求），团队尚未被唤起。'
