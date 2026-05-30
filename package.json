@@ -10,7 +10,7 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "tsx scripts/test-state-machine.ts",
+    "test": "tsx scripts/test-state-machine.ts && tsx scripts/test-transcript.ts",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "icon": "node scripts/build-icon.cjs",
     "shortcut": "node scripts/build-icon.cjs && powershell -ExecutionPolicy Bypass -File scripts/install-shortcut.ps1"
