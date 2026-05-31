@@ -25,7 +25,13 @@ import type {
   SessionNotification,
   ContentBlock
 } from '@agentclientprotocol/sdk'
-import type { AgentProfile, AssistantMemory, AssistantTurn, MemoryHit } from '@shared/types'
+import type {
+  AgentProfile,
+  AssistantMemory,
+  AssistantMessageRecord,
+  AssistantTurn,
+  MemoryHit
+} from '@shared/types'
 import { AcpRuntime } from '../acp/runtime'
 import { getWorkspaceDir, ensureWorkspaceDir } from '../paths'
 import { assistantMessageRepo } from '../storage/db'
@@ -308,6 +314,20 @@ export class AssistantBrain {
     const profileIds = new Set(profile.map((m) => m.id))
     const recalled = hits.filter((h) => !profileIds.has(h.id))
 
+    // Full-text search the brain's OWN past thread for the user's question —
+    // surfaces older exact-term context beyond the ~60 turns it hydrates and the
+    // memories vector-recall covers. Only for a real user question; background
+    // passes don't pose one. searchHistory already excludes the recent window so
+    // we don't re-inject what's already in context.
+    let history: AssistantMessageRecord[] = []
+    if (signal.kind === 'user-message') {
+      try {
+        history = assistantMessageRepo.searchHistory(signal.text)
+      } catch (e) {
+        console.error('[assistant-brain] history search failed:', (e as Error).message)
+      }
+    }
+
     const rt = this.ensureRuntime()
 
     // First turn of the process: pull the recent thread out of the DB so the
@@ -346,7 +366,14 @@ export class AssistantBrain {
       // otherwise a failed turn (e.g. adapter spawn error) would burn the flag
       // and every later turn would run with no delegator identity.
       const includeSystem = !this.systemPromptSent
-      const promptText = this.buildPrompt(signal, recalled, includeSystem, compactSummary, profile)
+      const promptText = this.buildPrompt(
+        signal,
+        recalled,
+        includeSystem,
+        compactSummary,
+        profile,
+        history
+      )
 
       // Build content blocks: text prompt + any image/file attachments the user
       // sent. The adapter (Claude Code) supports multimodal input.
@@ -416,7 +443,8 @@ export class AssistantBrain {
     hits: MemoryHit[],
     includeSystem: boolean,
     compactSummary?: string,
-    profile: AssistantMemory[] = []
+    profile: AssistantMemory[] = [],
+    history: AssistantMessageRecord[] = []
   ): string {
     const parts: string[] = []
     if (includeSystem) {
@@ -430,6 +458,16 @@ export class AssistantBrain {
     if (profile.length > 0) {
       const lines = profile.map((m) => `- (${m.kind}) ${m.content}`).join('\n')
       parts.push(`[关于用户]（始终适用，务必遵守）\n${lines}`)
+    }
+    if (history.length > 0) {
+      const lines = history
+        .map((m) => {
+          const who = m.role === 'user' ? '用户' : '你'
+          const when = new Date(m.ts).toLocaleDateString('zh-CN')
+          return `- [${when}] ${who}：${clampLine(m.text, 200)}`
+        })
+        .join('\n')
+      parts.push(`[历史片段]（更早的相关对话，供参考，可能与当前无关）\n${lines}`)
     }
     if (hits.length > 0) {
       const lines = hits.map((h) => `- (${h.kind}) ${h.content}`).join('\n')

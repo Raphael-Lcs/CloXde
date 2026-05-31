@@ -27,6 +27,7 @@ import type {
 } from '@shared/types'
 import { getDbPath, ensureCloxdeDir } from '../paths'
 import { runMigrations } from './migrations'
+import { buildHistoryFtsQuery } from '../assistant/history-query'
 
 let db: DBType | null = null
 
@@ -1262,6 +1263,36 @@ export const assistantMessageRepo = {
   /** Wipe the whole thread — used by /new (session reset). */
   clear(): void {
     getDb().prepare('DELETE FROM assistant_messages').run()
+  },
+  /** Full-text search the thread for messages relevant to `query`, EXCLUDING the
+   *  most recent `excludeRecent` rows (the window the brain already hydrates /
+   *  holds in session) so it surfaces only older context worth re-injecting.
+   *  Returns best bm25 matches, newest-relevant first by rank. Empty when the
+   *  query yields no usable FTS term. */
+  searchHistory(
+    query: string,
+    opts?: { limit?: number; excludeRecent?: number }
+  ): AssistantMessageRecord[] {
+    const match = buildHistoryFtsQuery(query)
+    if (!match) return []
+    const limit = opts?.limit ?? 4
+    const excludeRecent = opts?.excludeRecent ?? 60
+    const rows = getDb()
+      .prepare(
+        `SELECT m.* FROM assistant_messages_fts f
+           JOIN assistant_messages m ON m.rowid = f.rowid
+         WHERE assistant_messages_fts MATCH ?
+           AND m.role IN ('user', 'assistant', 'report')
+           AND m.ts < (
+             SELECT COALESCE(MIN(ts), 9.99e15) FROM (
+               SELECT ts FROM assistant_messages ORDER BY ts DESC LIMIT ?
+             )
+           )
+         ORDER BY bm25(assistant_messages_fts) ASC
+         LIMIT ?`
+      )
+      .all(match, excludeRecent, limit) as AssistantMessageRow[]
+    return rows.map(rowToAssistantMessage)
   },
   /** Cap the thread to its most recent `keep` rows. The assistant thread is a
    *  single ever-growing log (unlike per-conversation team messages), so without

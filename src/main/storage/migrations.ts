@@ -316,6 +316,51 @@ const MIGRATIONS: Migration[] = [
           ON assistant_messages(role, read);
       `)
     }
+  },
+  {
+    version: 13,
+    name: 'assistant-messages-fts',
+    up(db) {
+      // Full-text index over the assistant's own thread, so the brain can surface
+      // relevant OLD messages beyond the ~60 it hydrates / the compacted window —
+      // exact-term / proper-noun lookups that vector recall (memories only) can't.
+      //
+      // Tokenizer = trigram: the only built-in tokenizer that handles Chinese
+      // (unicode61 doesn't segment CJK). External-content table (content=…) so we
+      // don't duplicate the message text; triggers keep it in sync, incl. the
+      // per-row deletes that trimToLast / clear fire.
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS assistant_messages_fts USING fts5(
+          text,
+          content='assistant_messages',
+          content_rowid='rowid',
+          tokenize='trigram'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS assistant_messages_ai
+        AFTER INSERT ON assistant_messages BEGIN
+          INSERT INTO assistant_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS assistant_messages_ad
+        AFTER DELETE ON assistant_messages BEGIN
+          INSERT INTO assistant_messages_fts(assistant_messages_fts, rowid, text)
+            VALUES ('delete', old.rowid, old.text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS assistant_messages_au
+        AFTER UPDATE ON assistant_messages BEGIN
+          INSERT INTO assistant_messages_fts(assistant_messages_fts, rowid, text)
+            VALUES ('delete', old.rowid, old.text);
+          INSERT INTO assistant_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+        END;
+      `)
+      // Backfill any rows that predate this migration.
+      db.exec(`
+        INSERT INTO assistant_messages_fts(rowid, text)
+          SELECT rowid, text FROM assistant_messages;
+      `)
+    }
   }
 ]
 
