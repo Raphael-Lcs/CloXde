@@ -76,6 +76,12 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
   const [liveStatus, setLiveStatus] = useState<string>('')
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null)
   const [elapsed, setElapsed] = useState(0)
+  // The brain's reasoning, ACCUMULATED across the turn's thought chunks (not
+  // overwritten — overwriting made the status line flicker through fragments
+  // like a slideshow). Default-collapsed: the live line just says "思考中…";
+  // the user expands to read the running thought stream if they want.
+  const [thoughtLog, setThoughtLog] = useState('')
+  const [thoughtOpen, setThoughtOpen] = useState(false)
   // Memory drawer: the assistant's long-term memory, browsable so the user can
   // see what it remembers and pin/forget entries.
   const [memoryOpen, setMemoryOpen] = useState(false)
@@ -97,6 +103,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
   const [soulSaving, setSoulSaving] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const attachIdRef = useRef(0)
+  const thoughtLogRef = useRef<HTMLDivElement>(null)
 
   const append = useCallback(
     (role: Entry['role'], text: string, nav?: { projectId?: string; conversationId?: string }) => {
@@ -160,9 +167,14 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
         case 'start':
           setTurnStartedAt(Date.now())
           setLiveStatus('思考中…')
+          setThoughtLog('')
           break
         case 'thought':
-          setLiveStatus(`💭 ${oneLine(a.text)}`)
+          // Accumulate the reasoning stream; keep the collapsed line stable at
+          // "思考中…" so it stops strobing through fragments. The full text is
+          // available on expand.
+          setThoughtLog((prev) => prev + a.text)
+          setLiveStatus('思考中…')
           break
         case 'tool':
           setLiveStatus(`🔧 ${oneLine(a.text)}`)
@@ -174,6 +186,8 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
         case 'error':
           setTurnStartedAt(null)
           setLiveStatus('')
+          setThoughtLog('')
+          setThoughtOpen(false)
           break
       }
     })
@@ -189,6 +203,13 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
     const id = setInterval(() => setElapsed(Math.floor((Date.now() - turnStartedAt) / 1000)), 500)
     return () => clearInterval(id)
   }, [turnStartedAt])
+
+  // Keep the expanded thought stream pinned to its tail as chunks append.
+  useEffect(() => {
+    if (!thoughtOpen) return
+    const el = thoughtLogRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [thoughtLog, thoughtOpen])
 
   const cancel = useCallback(() => {
     void window.api.assistant?.cancel()
@@ -589,6 +610,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
         </div>
       )}
       <div className="assistant-stream" ref={scrollRef}>
+        <div className="assistant-stream-inner">
         {entries.length === 0 ? (
           <div className="assistant-empty">
             和助理说点什么吧。它不会自己写代码——它会判断、决定，然后把活派给团队。
@@ -612,17 +634,30 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
           })
         )}
         {sending && (
-          <div className="assistant-live">
-            <span className="assistant-live-dot" />
-            <span className="assistant-live-text">
-              {liveStatus || '助理思考中…'}
-              {turnStartedAt != null && elapsed > 0 ? `（${elapsed}s）` : ''}
-            </span>
-            <button className="assistant-live-cancel" onClick={cancel} title="打断这一轮">
-              打断
-            </button>
-          </div>
+          <>
+            <div className="assistant-live">
+              <span className="assistant-live-dot" />
+              <span
+                className={`assistant-live-text${thoughtLog ? ' has-thought' : ''}`}
+                onClick={thoughtLog ? () => setThoughtOpen((v) => !v) : undefined}
+                title={thoughtLog ? '展开/收起思考过程' : undefined}
+              >
+                {thoughtLog ? (thoughtOpen ? '▾ ' : '▸ ') : ''}
+                {liveStatus || '助理思考中…'}
+                {turnStartedAt != null && elapsed > 0 ? `（${elapsed}s）` : ''}
+              </span>
+              <button className="assistant-live-cancel" onClick={cancel} title="打断这一轮">
+                打断
+              </button>
+            </div>
+            {thoughtOpen && thoughtLog && (
+              <div className="assistant-thought-log" ref={thoughtLogRef}>
+                {thoughtLog}
+              </div>
+            )}
+          </>
         )}
+        </div>
       </div>
       <div
         className={`assistant-composer ${dragOver ? 'drag-over' : ''}`}

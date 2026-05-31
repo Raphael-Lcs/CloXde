@@ -4,11 +4,21 @@
 // steps.
 //
 // Two hard rules, both from the 2026-05-31 design correction:
-//   1. It is periodic, NOT per-turn-end. We do not fire the brain on every team
-//      round — that's a probabilistic trigger the user rejected as unreasonable.
+//   1. It does NOT fire on every team round — that's a per-round probabilistic
+//      trigger the user rejected as unreasonable. It fires when a team
+//      conversation *settles* (ended / awaiting-user), which under autopilot
+//      happens once per completion or halt, not per internal handoff.
 //   2. It only fires during a QUIET WINDOW (no team mid-turn). The brain is a
 //      heavy local Claude Code / ONNX process; running it while a team works
 //      would drag machine performance even though it wouldn't block the team.
+//
+// Two wake paths share one gated runPass:
+//   - Event-driven (the fast path): a team settling emits 'conversation-updated';
+//     we debounce-schedule a pass so team→assistant report latency is seconds,
+//     not minutes. This is what makes the assistant feel responsive after a
+//     team finishes.
+//   - Periodic (the 5-min fallback): a safety net for missed settles, and the
+//     only driver for time-based work — reminders, reflection, decay/prune.
 //
 // To avoid burning tokens on no-ops, a pass that finds no team activity newer
 // than the last review simply skips thinking.
@@ -20,7 +30,7 @@ import { nextCronFire } from '../conversation/cron'
 import { getWorkspaceDir } from '../paths'
 import { getAssistantBrain, type Signal } from './brain'
 import { getMemoryService } from './memory'
-import type { Message, Project } from '@shared/types'
+import type { Message, Project, ConversationView } from '@shared/types'
 
 type AnyBusyFn = () => boolean
 type ThinkFn = (signal: Signal) => Promise<unknown>
@@ -73,6 +83,12 @@ function buildReflectionPrompt(existing: { kind: string; content: string }[]): s
 let timer: ReturnType<typeof setInterval> | null = null
 let running = false
 let lastPrunedAt = 0
+/** Debounce window for the event-driven path. A settling team emits
+ *  'conversation-updated'; we wait this long before running a pass so a burst of
+ *  near-simultaneous settles (or a momentary settle during an autopilot handoff
+ *  that immediately resumes) collapses into at most one wake, and a team that
+ *  resumes within the window is caught by the quiet-window gate as a no-op. */
+const NUDGE_DEBOUNCE_MS = 5000
 /** When the last reflection pass ran, and the brain's turn count at that time.
  *  Together they gate reflection: at most once per interval, and only if the
  *  brain has had new turns since (otherwise there's nothing new to distill). */
@@ -81,6 +97,40 @@ let lastReflectedTurns = 0
 /** Newest team-message ts the brain has already reviewed. A pass that sees
  *  nothing newer skips, so a long-idle machine doesn't re-think the same state. */
 let lastReviewedTs = 0
+
+/** The event-driven path's debounce timer + the deps it needs to run a pass.
+ *  liveDeps is captured when startAssistantReview wires up, so a settle event
+ *  (which carries no deps of its own) can reuse the same gated runPass the
+ *  periodic timer uses. settleListener is held so stop can detach it. */
+let nudgeTimer: ReturnType<typeof setTimeout> | null = null
+let liveDeps: {
+  anyBusy: AnyBusyFn
+  think: ThinkFn
+  brainBusy: AnyBusyFn
+  turnCount: TurnCountFn
+} | null = null
+let settleListener: ((view: ConversationView) => void) | null = null
+
+/** Is this project one the assistant scaffolded (under its workspace)? Used to
+ *  ignore settle events from projects the user opened by hand. */
+function isOwnedProject(projectId: string): boolean {
+  const p = projectRepo.get(projectId)
+  return !!p && p.rootDir.startsWith(join(getWorkspaceDir()))
+}
+
+/** Schedule a gated review pass shortly. Debounced: rapid settles collapse into
+ *  one wake. The pass still runs through every gate in runPass (quiet-window,
+ *  brain-busy, no-new-activity), so a premature nudge is a cheap no-op. */
+function requestReviewSoon(): void {
+  if (!liveDeps) return
+  if (nudgeTimer) clearTimeout(nudgeTimer)
+  nudgeTimer = setTimeout(() => {
+    nudgeTimer = null
+    const d = liveDeps
+    if (d) void runPass(d.anyBusy, d.think, d.brainBusy, d.turnCount)
+  }, NUDGE_DEBOUNCE_MS)
+  if (nudgeTimer && typeof nudgeTimer.unref === 'function') nudgeTimer.unref()
+}
 
 /** Projects the assistant itself scaffolded — those under its workspace. The
  *  assistant only reviews its own teams, not projects the user opened by hand. */
@@ -360,6 +410,19 @@ export function startAssistantReview(opts?: {
     opts?.intervalMs ?? REVIEW_INTERVAL_MS
   )
   if (typeof timer.unref === 'function') timer.unref()
+
+  // Event-driven path: a team settling (ended / awaiting-user) wakes the brain
+  // within NUDGE_DEBOUNCE_MS instead of waiting for the next 5-min tick. Only
+  // owned teams, and only the settle transition — under autopilot a conversation
+  // stays 'thinking' across internal handoffs, so this is once-per-completion,
+  // not the per-round trigger rule #1 forbids.
+  liveDeps = { anyBusy, think, brainBusy, turnCount }
+  settleListener = (view) => {
+    if (view.status !== 'ended' && view.status !== 'awaiting-user') return
+    if (!isOwnedProject(view.projectId)) return
+    requestReviewSoon()
+  }
+  conversationEngine.on('conversation-updated', settleListener)
 }
 
 export function stopAssistantReview(): void {
@@ -367,6 +430,15 @@ export function stopAssistantReview(): void {
     clearInterval(timer)
     timer = null
   }
+  if (settleListener) {
+    conversationEngine.off('conversation-updated', settleListener)
+    settleListener = null
+  }
+  if (nudgeTimer) {
+    clearTimeout(nudgeTimer)
+    nudgeTimer = null
+  }
+  liveDeps = null
   running = false
   lastReviewedTs = 0
   lastPrunedAt = 0
