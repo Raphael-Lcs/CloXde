@@ -19,6 +19,7 @@ import { FileExplorer } from './components/FileExplorer'
 import { TeamPanel } from './components/TeamPanel'
 import { ChangesPanel } from './components/ChangesPanel'
 import { SchedulesPanel } from './components/SchedulesPanel'
+import { AssistantPanel } from './components/AssistantPanel'
 import { Logo } from './components/Logo'
 import { TaskInspector } from './components/TaskInspector'
 import { CommandPalette, type Command } from './components/CommandPalette'
@@ -83,6 +84,9 @@ export function App(): JSX.Element {
   const [showSystem, setShowSystem] = useState(true)
   const [taskInspectorOpen, setTaskInspectorOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  // Standalone assistant view — the user-scoped layer above the team. When
+  // open, it replaces the project/conversation main area.
+  const [assistantOpen, setAssistantOpen] = useState(false)
   // Attention loop: which conversations need the user, surfaced as a titlebar
   // badge + transient toasts. Lets the user walk away while autopilot grinds
   // and only get pulled back when a run stops for them.
@@ -562,6 +566,14 @@ export function App(): JSX.Element {
           <span>CloXde</span>
         </div>
         <div className="spacer" />
+        <button
+          className={`titlebar-icon ${assistantOpen ? 'active' : ''}`}
+          onClick={() => setAssistantOpen((v) => !v)}
+          title="助理（在团队之上、了解你的私人助理）"
+          aria-label="助理"
+        >
+          <AssistantIcon />
+        </button>
         {waitingConversations.length > 0 && (
           <div className="attention-wrap">
             <button
@@ -661,7 +673,9 @@ export function App(): JSX.Element {
           versionLabel={version ? `CloXde · v${version}` : ''}
         />
         <main className="main">
-          {!activeProject ? (
+          {assistantOpen ? (
+            <AssistantPanel />
+          ) : !activeProject ? (
             <EmptyHero onOpen={() => void handleOpenFolder()} />
           ) : !conversation ? (
             <EmptyProject
@@ -980,6 +994,26 @@ function BellIcon(): JSX.Element {
     >
       <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
       <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+  )
+}
+
+function AssistantIcon(): JSX.Element {
+  // A friendly spark/companion glyph — the assistant that watches over things.
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8L12 3z" />
+      <circle cx="18" cy="18" r="2.2" />
     </svg>
   )
 }

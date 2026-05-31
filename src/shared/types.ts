@@ -172,6 +172,67 @@ export interface Schedule {
   updatedAt: number
 }
 
+// --- Assistant memory ------------------------------------------------------
+//
+// The assistant's long-term, user-scoped memory — distinct from per-
+// conversation history. The assistant distills these autonomously (the user
+// does not hand-feed them) and recalls them by semantic similarity at
+// decision time. Stored in better-sqlite3 with embeddings in a sqlite-vec
+// vec0 table; see migration v11.
+
+export type MemoryKind =
+  | 'preference' // how the user likes things done
+  | 'fact' // stable truths about the user / their world
+  | 'project' // ongoing initiatives, goals, deadlines
+  | 'person' // people in the user's orbit
+  | 'pattern' // recurring behaviours / routines worth anticipating
+  | 'episodic' // notable one-off events, for later recall
+
+export interface AssistantMemory {
+  /** External (string) id used across IPC, matching the app's uuid style. */
+  id: string
+  kind: MemoryKind
+  content: string
+  /** Provenance, e.g. 'distilled:<conversationId>' | 'manual' | 'observed'. */
+  source?: string
+  /** 0..1 — how strongly the assistant trusts this; drives decay/pruning. */
+  confidence: number
+  /** User-pinned memories are never auto-pruned. */
+  pinned: boolean
+  createdAt: number
+  updatedAt: number
+  /** Epoch ms this memory was last recalled; null until first use. */
+  lastUsedAt?: number
+}
+
+/** A memory returned from semantic recall, with its distance to the query. */
+export interface MemoryHit extends AssistantMemory {
+  /** vec0 L2 distance — smaller is closer. */
+  distance: number
+}
+
+/** A proactive note the assistant surfaces to the user (e.g. a review-pass
+ *  finding). Pushed over AssistantReportEvent. */
+export interface AssistantReport {
+  ts: number
+  message: string
+  projectId?: string
+  conversationId?: string
+}
+
+/** The outcome of one assistant turn (a user message handled by the brain):
+ *  what it said and what it did. */
+export interface AssistantTurn {
+  /** The brain's full text reply (tags stripped of meaning, shown as-is). */
+  raw: string
+  /** Teams it dispatched this turn. */
+  dispatched: { name: string; projectId: string; conversationId: string }[]
+  /** How many memories it wrote. */
+  remembered: number
+  /** Messages it addressed to the user. */
+  reports: string[]
+}
+
 // --- Messages --------------------------------------------------------------
 
 export interface PlanEntry {

@@ -241,6 +241,52 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules(enabled, next_fire_at);
       `)
     }
+  },
+  {
+    version: 11,
+    name: 'assistant-memory',
+    up(db) {
+      // The assistant's long-term, user-scoped memory — separate from
+      // per-conversation history. The assistant distills these autonomously
+      // (the user does not hand-feed them) and recalls them by semantic
+      // similarity at decision time.
+      //
+      // Two coupled tables:
+      //  - assistant_memories: the structured record. INTEGER PK so its rowid
+      //    is stable; we also carry a uuid for external (IPC) references to
+      //    match the rest of the app's string-id convention.
+      //  - vec_assistant_memories: sqlite-vec vec0 virtual table holding the
+      //    embedding, keyed by rowid == assistant_memories.id. vec0 rowids
+      //    MUST be bound as BigInt from better-sqlite3 (plain JS integers are
+      //    rejected with "Only integers are allowed for primary key").
+      //
+      // Embedding dimension is fixed at the local embedder's output (384 for
+      // a MiniLM-class model). Changing embedder => new migration.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS assistant_memories (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          uuid TEXT NOT NULL UNIQUE,
+          /* 'preference' | 'fact' | 'project' | 'person' | 'pattern' | 'episodic' */
+          kind TEXT NOT NULL,
+          content TEXT NOT NULL,
+          /* provenance, e.g. 'distilled:<conversationId>' | 'manual' | 'observed' */
+          source TEXT,
+          confidence REAL NOT NULL DEFAULT 0.5,
+          /* user-pinned memories are never auto-pruned by the decay pass */
+          pinned INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          /* bumped on recall; drives decay/pruning of stale, low-confidence rows */
+          last_used_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_assistant_memories_kind
+          ON assistant_memories(kind);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS vec_assistant_memories USING vec0(
+          embedding float[384]
+        );
+      `)
+    }
   }
 ]
 

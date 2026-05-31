@@ -486,6 +486,17 @@ export class ConversationEngine extends EventEmitter {
     return this.allSides(slot).some((sr) => sr.streamingMessageId)
   }
 
+  /** True when ANY loaded conversation has a side mid-turn. The assistant's
+   *  proactive review pass gates on this: the brain is a heavy local process,
+   *  so it only wakes during a quiet window (no team working) to avoid dragging
+   *  machine performance, even though it wouldn't block the team. */
+  anyBusy(): boolean {
+    for (const slot of this.active.values()) {
+      if (this.allSides(slot).some((sr) => sr.streamingMessageId)) return true
+    }
+    return false
+  }
+
   async dispose(conversationId: string): Promise<void> {
     const slot = this.active.get(conversationId)
     if (!slot) return

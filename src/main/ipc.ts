@@ -4,6 +4,9 @@ import { existsSync, statSync } from 'node:fs'
 import type {
   AgentKind,
   AgentProfile,
+  AssistantMemory,
+  AssistantReport,
+  AssistantTurn,
   Conversation,
   ConversationView,
   DirEntry,
@@ -19,6 +22,9 @@ import { IPC } from '@shared/ipc-channels'
 import { conversationRepo, getDb, messageRepo, profileRepo, projectRepo, scheduleRepo } from './storage/db'
 import { conversationEngine } from './conversation/engine'
 import { createSchedule, updateSchedule } from './conversation/scheduler'
+import { getAssistantBrain } from './assistant/brain'
+import { getMemoryService } from './assistant/memory'
+import { assistantBus } from './assistant/actions'
 import { buildInheritedSummary } from './conversation/summarizer'
 import { ensureWatch, listDir, listProjectFiles, openPath, stopWatch } from './fs/inspector'
 import { gitDiffFile, gitStatus } from './fs/git'
@@ -100,6 +106,11 @@ export function registerIpcHandlers(): void {
       broadcast(IPC.MessagePatchedEvent, payload)
     }
   )
+
+  // The assistant's proactive reports (from the review loop) → renderer.
+  assistantBus.on('report', (report: AssistantReport) => {
+    broadcast(IPC.AssistantReportEvent, report)
+  })
 
   // --- App ---------------------------------------------------------------
   ipcMain.handle(IPC.AppGetVersion, () => ok(app.getVersion()))
@@ -586,6 +597,31 @@ export function registerIpcHandlers(): void {
       if (typeof id !== 'string') return err('invalid id')
       scheduleRepo.delete(id)
       return ok(true)
+    }
+  )
+
+  // --- Assistant ----------------------------------------------------------
+  ipcMain.handle(
+    IPC.AssistantSendMessage,
+    async (_e, text: unknown): Promise<IpcResult<AssistantTurn>> => {
+      if (typeof text !== 'string' || !text.trim()) return err('empty message')
+      try {
+        const turn = await getAssistantBrain().think({
+          kind: 'user-message',
+          text: text.trim()
+        })
+        return ok(turn)
+      } catch (e) {
+        return err(`助理处理失败：${(e as Error).message}`)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.AssistantListMemories,
+    (_e, limit: unknown): IpcResult<AssistantMemory[]> => {
+      const n = typeof limit === 'number' && limit > 0 ? Math.floor(limit) : 50
+      return ok(getMemoryService().list({ limit: n }))
     }
   )
 

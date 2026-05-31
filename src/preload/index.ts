@@ -3,6 +3,9 @@ import { IPC } from '../shared/ipc-channels'
 import type {
   AgentKind,
   AgentProfile,
+  AssistantMemory,
+  AssistantReport,
+  AssistantTurn,
   Conversation,
   ConversationView,
   DirEntry,
@@ -162,6 +165,15 @@ const api = {
   presence: {
     onActivity: (cb: (rec: PresenceActivity) => void): Unsubscribe =>
       on<PresenceActivity>(IPC.PresenceActivityEvent, cb)
+  },
+  /** The assistant layer — the user-scoped delegator above the team. */
+  assistant: {
+    sendMessage: (text: string): Promise<IpcResult<AssistantTurn>> =>
+      ipcRenderer.invoke(IPC.AssistantSendMessage, text),
+    listMemories: (limit?: number): Promise<IpcResult<AssistantMemory[]>> =>
+      ipcRenderer.invoke(IPC.AssistantListMemories, limit),
+    onReport: (cb: (report: AssistantReport) => void): Unsubscribe =>
+      on<AssistantReport>(IPC.AssistantReportEvent, cb)
   },
   fs: {
     listDir: (projectId: string, relPath: string): Promise<IpcResult<DirEntry[]>> =>

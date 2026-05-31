@@ -41,6 +41,11 @@ export const IPC = {
   SchedulesUpdate: 'schedules:update',
   SchedulesDelete: 'schedules:delete',
 
+  // Assistant (the user-scoped layer above the team)
+  AssistantSendMessage: 'assistant:send-message', // user → brain, returns AssistantTurn
+  AssistantListMemories: 'assistant:list-memories',
+  AssistantReportEvent: 'assistant:report', // main → renderer, proactive AssistantReport
+
   // Events (main → renderer)
   ConversationUpdatedEvent: 'conversation:updated', // ConversationView snapshot
   MessageAppendedEvent: 'conversation:message-appended', // { conversationId, message }

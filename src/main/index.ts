@@ -5,6 +5,8 @@ import { initStorage, closeStorage } from './storage/db'
 import { registerIpcHandlers } from './ipc'
 import { conversationEngine } from './conversation/engine'
 import { startScheduler, stopScheduler } from './conversation/scheduler'
+import { startAssistantReview, stopAssistantReview } from './assistant/review'
+import { getAssistantBrain } from './assistant/brain'
 import { stopAllWatches } from './fs/inspector'
 import { startHttpServer, stopHttpServer } from './server/http-server'
 
@@ -223,6 +225,12 @@ app.whenReady().then(() => {
     (conversationId) => conversationEngine.isBusy(conversationId)
   )
 
+  // The assistant's proactive review loop: periodically (and only during a
+  // quiet window, when no team is mid-turn) the assistant reviews the teams it
+  // dispatched and decides next steps. Distinct from the scheduler — this wakes
+  // the assistant brain, not a team conversation.
+  startAssistantReview()
+
   // Start the LAN HTTP+WS companion server so the Android tablet App can
   // talk to this desktop instance. The port is configurable via env so power
   // users can avoid collisions; default 7878.
@@ -308,9 +316,11 @@ app.on('before-quit', (event) => {
   void (async () => {
     try {
       stopScheduler()
+      stopAssistantReview()
       stopAllWatches()
       await Promise.allSettled([
         conversationEngine.disposeAll(),
+        getAssistantBrain().dispose(),
         stopHttpServer()
       ])
       closeStorage()

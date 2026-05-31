@@ -1,11 +1,15 @@
 import Database from 'better-sqlite3'
 import type { Database as DBType } from 'better-sqlite3'
+import { load as loadSqliteVec } from 'sqlite-vec'
 import { randomUUID } from 'node:crypto'
 import type {
   AgentKind,
   AgentProfile,
+  AssistantMemory,
   Conversation,
   ConversationStatus,
+  MemoryHit,
+  MemoryKind,
   Message,
   MessageBlock,
   MessageRole,
@@ -30,6 +34,9 @@ export function initStorage(): DBType {
   const instance = new Database(getDbPath())
   instance.pragma('journal_mode = WAL')
   instance.pragma('foreign_keys = ON')
+  // sqlite-vec must load before migrations — migration v11 creates a vec0
+  // virtual table for assistant memory embeddings.
+  loadSqliteVec(instance)
   runMigrations(instance)
   db = instance
   return instance
@@ -934,5 +941,234 @@ export const scheduleRepo = {
   },
   delete(id: string): void {
     getDb().prepare('DELETE FROM schedules WHERE id = ?').run(id)
+  }
+}
+
+// --- Assistant memory ------------------------------------------------------
+//
+// Pure storage for the assistant's long-term memory. The structured record
+// lives in `assistant_memories` (INTEGER PK so its rowid is stable); the
+// embedding lives in the sqlite-vec `vec_assistant_memories` vec0 table keyed
+// by that same rowid. Embedding generation is NOT here — callers pass a
+// Float32Array; the assistant's MemoryService owns the embedder. See v11.
+//
+// Two sqlite-vec gotchas baked into the queries below:
+//   • vec0 rowids must be bound as BigInt (plain JS ints are rejected).
+//   • a knn query needs its LIMIT directly on the vec0 table, so recall uses
+//     a CTE (search first, then JOIN to the record) — a JOIN with the LIMIT
+//     on the outer query fails with "a LIMIT/k is required".
+
+interface MemoryRow {
+  id: number
+  uuid: string
+  kind: string
+  content: string
+  source: string | null
+  confidence: number
+  pinned: number
+  created_at: number
+  updated_at: number
+  last_used_at: number | null
+}
+
+function rowToMemory(row: MemoryRow): AssistantMemory {
+  return {
+    id: row.uuid,
+    kind: row.kind as MemoryKind,
+    content: row.content,
+    source: row.source ?? undefined,
+    confidence: row.confidence,
+    pinned: row.pinned !== 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastUsedAt: row.last_used_at ?? undefined
+  }
+}
+
+const MEMORY_COLUMNS = `id, uuid, kind, content, source, confidence, pinned,
+  created_at, updated_at, last_used_at`
+
+function embeddingToBlob(embedding: Float32Array): Buffer {
+  return Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength)
+}
+
+export const memoryRepo = {
+  insert(input: {
+    kind: MemoryKind
+    content: string
+    embedding: Float32Array
+    source?: string
+    confidence?: number
+    pinned?: boolean
+  }): AssistantMemory {
+    const uuid = randomUUID()
+    const now = Date.now()
+    const db = getDb()
+    const insertRow = db.prepare(
+      `INSERT INTO assistant_memories
+         (uuid, kind, content, source, confidence, pinned, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    const insertVec = db.prepare(
+      'INSERT INTO vec_assistant_memories (rowid, embedding) VALUES (?, ?)'
+    )
+    db.transaction(() => {
+      const info = insertRow.run(
+        uuid,
+        input.kind,
+        input.content,
+        input.source ?? null,
+        input.confidence ?? 0.5,
+        input.pinned ? 1 : 0,
+        now,
+        now
+      )
+      insertVec.run(BigInt(info.lastInsertRowid), embeddingToBlob(input.embedding))
+    })()
+    return {
+      id: uuid,
+      kind: input.kind,
+      content: input.content,
+      source: input.source,
+      confidence: input.confidence ?? 0.5,
+      pinned: input.pinned ?? false,
+      createdAt: now,
+      updatedAt: now
+    }
+  },
+  get(id: string): AssistantMemory | null {
+    const row = getDb()
+      .prepare(`SELECT ${MEMORY_COLUMNS} FROM assistant_memories WHERE uuid = ?`)
+      .get(id) as MemoryRow | undefined
+    return row ? rowToMemory(row) : null
+  },
+  list(opts?: { kind?: MemoryKind; limit?: number }): AssistantMemory[] {
+    const where = opts?.kind ? 'WHERE kind = ?' : ''
+    const params: unknown[] = opts?.kind ? [opts.kind] : []
+    const limit = opts?.limit ?? 500
+    const rows = getDb()
+      .prepare(
+        `SELECT ${MEMORY_COLUMNS} FROM assistant_memories ${where}
+         ORDER BY pinned DESC, updated_at DESC LIMIT ?`
+      )
+      .all(...params, limit) as MemoryRow[]
+    return rows.map(rowToMemory)
+  },
+  patch(
+    id: string,
+    patch: {
+      content?: string
+      source?: string
+      confidence?: number
+      pinned?: boolean
+    }
+  ): void {
+    const fields: string[] = []
+    const values: unknown[] = []
+    if (patch.content !== undefined) { fields.push('content = ?'); values.push(patch.content) }
+    if (patch.source !== undefined) { fields.push('source = ?'); values.push(patch.source) }
+    if (patch.confidence !== undefined) { fields.push('confidence = ?'); values.push(patch.confidence) }
+    if (patch.pinned !== undefined) { fields.push('pinned = ?'); values.push(patch.pinned ? 1 : 0) }
+    if (fields.length === 0) return
+    fields.push('updated_at = ?')
+    values.push(Date.now())
+    values.push(id)
+    getDb()
+      .prepare(`UPDATE assistant_memories SET ${fields.join(', ')} WHERE uuid = ?`)
+      .run(...values)
+  },
+  /** Replace the embedding for a memory (after its content was rewritten). */
+  updateEmbedding(id: string, embedding: Float32Array): void {
+    const db = getDb()
+    const row = db
+      .prepare('SELECT id FROM assistant_memories WHERE uuid = ?')
+      .get(id) as { id: number } | undefined
+    if (!row) return
+    db.prepare('UPDATE vec_assistant_memories SET embedding = ? WHERE rowid = ?').run(
+      embeddingToBlob(embedding),
+      BigInt(row.id)
+    )
+  },
+  /** Bump last_used_at — marks a memory as recently relevant so the decay
+   *  pass keeps it. */
+  touch(ids: string[]): void {
+    if (ids.length === 0) return
+    const placeholders = ids.map(() => '?').join(',')
+    getDb()
+      .prepare(
+        `UPDATE assistant_memories SET last_used_at = ? WHERE uuid IN (${placeholders})`
+      )
+      .run(Date.now(), ...ids)
+  },
+  /** Semantic recall: k nearest memories to the query embedding. Optional
+   *  kind filter is applied after the knn (vec0 can't filter mid-search), so
+   *  we over-fetch when a kind is given. */
+  searchByVector(
+    queryEmbedding: Float32Array,
+    k: number,
+    opts?: { kind?: MemoryKind }
+  ): MemoryHit[] {
+    const fetch = opts?.kind ? k * 5 : k
+    const rows = getDb()
+      .prepare(
+        `WITH knn AS (
+           SELECT rowid, distance FROM vec_assistant_memories
+           WHERE embedding MATCH ? ORDER BY distance LIMIT ?)
+         SELECT ${MEMORY_COLUMNS.split(', ').map((c) => 'm.' + c.trim()).join(', ')},
+                knn.distance AS distance
+         FROM knn JOIN assistant_memories m ON m.id = knn.rowid
+         ${opts?.kind ? 'WHERE m.kind = ?' : ''}
+         ORDER BY knn.distance LIMIT ?`
+      )
+      .all(
+        embeddingToBlob(queryEmbedding),
+        fetch,
+        ...(opts?.kind ? [opts.kind] : []),
+        k
+      ) as (MemoryRow & { distance: number })[]
+    return rows.map((r) => ({ ...rowToMemory(r), distance: r.distance }))
+  },
+  /** Keyword fallback for when no embedder is available. */
+  searchByText(query: string, k: number): AssistantMemory[] {
+    const rows = getDb()
+      .prepare(
+        `SELECT ${MEMORY_COLUMNS} FROM assistant_memories
+         WHERE content LIKE ? ORDER BY pinned DESC, updated_at DESC LIMIT ?`
+      )
+      .all(`%${query}%`, k) as MemoryRow[]
+    return rows.map(rowToMemory)
+  },
+  delete(id: string): void {
+    const db = getDb()
+    const row = db
+      .prepare('SELECT id FROM assistant_memories WHERE uuid = ?')
+      .get(id) as { id: number } | undefined
+    if (!row) return
+    db.transaction(() => {
+      db.prepare('DELETE FROM vec_assistant_memories WHERE rowid = ?').run(BigInt(row.id))
+      db.prepare('DELETE FROM assistant_memories WHERE id = ?').run(row.id)
+    })()
+  },
+  /** Decay pass: drop unpinned, low-confidence memories that haven't been
+   *  recalled since `staleBefore`. Returns the number removed. */
+  pruneStale(opts: { staleBefore: number; maxConfidence: number }): number {
+    const db = getDb()
+    const victims = db
+      .prepare(
+        `SELECT id FROM assistant_memories
+         WHERE pinned = 0 AND confidence < ?
+           AND COALESCE(last_used_at, created_at) < ?`
+      )
+      .all(opts.maxConfidence, opts.staleBefore) as { id: number }[]
+    if (victims.length === 0) return 0
+    const delVec = db.prepare('DELETE FROM vec_assistant_memories WHERE rowid = ?')
+    const delRow = db.prepare('DELETE FROM assistant_memories WHERE id = ?')
+    db.transaction(() => {
+      for (const v of victims) {
+        delVec.run(BigInt(v.id))
+        delRow.run(v.id)
+      }
+    })()
+    return victims.length
   }
 }

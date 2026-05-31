@@ -5,6 +5,9 @@
 import type {
   AgentKind,
   AgentProfile,
+  AssistantMemory,
+  AssistantReport,
+  AssistantTurn,
   Conversation,
   ConversationView,
   DirEntry,
@@ -101,6 +104,11 @@ interface CloXdeApi {
   }
   presence: {
     onActivity: (cb: (rec: PresenceActivity) => void) => Unsubscribe
+  }
+  assistant: {
+    sendMessage: (text: string) => Promise<IpcResult<AssistantTurn>>
+    listMemories: (limit?: number) => Promise<IpcResult<AssistantMemory[]>>
+    onReport: (cb: (report: AssistantReport) => void) => Unsubscribe
   }
   schedules: {
     listByConversation: (conversationId: string) => Promise<IpcResult<Schedule[]>>
