@@ -124,7 +124,7 @@ function extractAll(text: string, tag: string): string[] {
  *  output, leaving just the natural-language reply to show the user. */
 function stripDirectives(text: string): string {
   return text
-    .replace(/<<(DISPATCH|REMEMBER|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
+    .replace(/<<(DISPATCH|CONTINUE|REMEMBER|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
@@ -135,6 +135,17 @@ export class AssistantBrain {
    *  team, so a turn past this is almost certainly wedged (a stuck tool). We
    *  cancel and surface an error instead of leaving the UI spinning forever. */
   private static readonly TURN_TIMEOUT_MS = 240_000
+  /** After this many turns on one ACP session, compact: drop the session and
+   *  reseed a fresh one with the system prompt + a short transcript summary.
+   *  The brain is long-lived, so without this its session history grows until
+   *  it overflows the model's context and the adapter errors. Durable facts
+   *  live in vector memory (recalled every turn), so dropping raw history is
+   *  safe — only the recent conversational thread needs carrying over. */
+  private static readonly COMPACT_AFTER_TURNS = 30
+  /** How many recent exchanges to carry across a compaction. */
+  private static readonly TRANSCRIPT_KEEP = 6
+  /** Per-side char clamp on a remembered exchange line. */
+  private static readonly TRANSCRIPT_CHARS = 600
   private runtime: AcpRuntime | null = null
   private systemPromptSent = false
   private buffer = ''
@@ -145,10 +156,41 @@ export class AssistantBrain {
    *  behind an active user conversation (which would drag the machine while the
    *  user is right there using it). */
   private inFlight = 0
+  /** Turns run on the CURRENT ACP session (reset on compaction / dispose). */
+  private turnsSinceFresh = 0
+  /** Rolling tail of recent exchanges, carried across a compaction so the
+   *  reseeded session still has the immediate conversational thread. */
+  private transcript: { user: string; assistant: string }[] = []
+  /** Monotonic count of completed turns over the brain's whole lifetime (NOT
+   *  reset on compaction). The reflection loop snapshots this to tell whether any
+   *  conversation happened since its last pass — so it never burns a turn (and
+   *  tokens) distilling an unchanged transcript. */
+  private turnsTotal = 0
 
   /** True while at least one think() turn is queued or running. */
   isBusy(): boolean {
     return this.inFlight > 0
+  }
+
+  /** Lifetime count of completed turns — used by the reflection loop to detect
+   *  new activity since its last pass. */
+  turnCount(): number {
+    return this.turnsTotal
+  }
+
+  private recordExchange(user: string, assistant: string): void {
+    this.transcript.push({
+      user: clampLine(user, AssistantBrain.TRANSCRIPT_CHARS),
+      assistant: clampLine(assistant, AssistantBrain.TRANSCRIPT_CHARS)
+    })
+    const overflow = this.transcript.length - AssistantBrain.TRANSCRIPT_KEEP
+    if (overflow > 0) this.transcript.splice(0, overflow)
+  }
+
+  private buildTranscriptSummary(): string {
+    return this.transcript
+      .map((e, i) => `${i + 1}. 用户：${e.user}\n   你：${e.assistant || '（无文字回复）'}`)
+      .join('\n')
   }
 
   private ensureRuntime(): AcpRuntime {
@@ -209,8 +251,23 @@ export class AssistantBrain {
     const hits = await memory.recall(signal.text, { k: 6 })
 
     const rt = this.ensureRuntime()
+
+    // Context compaction: once the session has run enough turns, drop it and
+    // reseed a fresh one carrying only the system prompt + a short transcript
+    // summary. Must happen BEFORE start() so restartFresh's forceFresh is
+    // consumed by the upcoming handshake.
+    let compactSummary = ''
+    if (this.turnsSinceFresh >= AssistantBrain.COMPACT_AFTER_TURNS) {
+      actions.emitActivity({ phase: 'tool', text: '压缩上下文' })
+      compactSummary = this.buildTranscriptSummary()
+      await rt.restartFresh()
+      this.systemPromptSent = false
+      this.turnsSinceFresh = 0
+    }
+
     this.buffer = ''
     actions.emitActivity({ phase: 'start' })
+    let reply = ''
     try {
       // Bring the session up FIRST so onSessionReady has run and
       // systemPromptSent reflects the real session state (fresh vs restored).
@@ -222,7 +279,7 @@ export class AssistantBrain {
       // otherwise a failed turn (e.g. adapter spawn error) would burn the flag
       // and every later turn would run with no delegator identity.
       const includeSystem = !this.systemPromptSent
-      const promptText = this.buildPrompt(signal, hits, includeSystem)
+      const promptText = this.buildPrompt(signal, hits, includeSystem, compactSummary)
 
       // Build content blocks: text prompt + any image/file attachments the user
       // sent. The adapter (Claude Code) supports multimodal input.
@@ -235,6 +292,8 @@ export class AssistantBrain {
 
       await this.promptWithTimeout(rt, blocks)
       if (includeSystem) this.systemPromptSent = true
+      this.turnsSinceFresh++
+      this.turnsTotal++
     } catch (e) {
       actions.emitActivity({ phase: 'error', text: (e as Error).message })
       throw e
@@ -245,6 +304,8 @@ export class AssistantBrain {
     // turn). Keep the turn "live" through it and emit 'done' only once the
     // directives have actually run, so the UI reflects the whole turn.
     const result = await this.executeDirectives(raw, signal)
+    reply = result.raw
+    this.recordExchange(signal.text, reply)
     actions.emitActivity({ phase: 'done' })
     return result
   }
@@ -273,10 +334,20 @@ export class AssistantBrain {
     if (this.runtime) await this.runtime.cancel()
   }
 
-  private buildPrompt(signal: Signal, hits: MemoryHit[], includeSystem: boolean): string {
+  private buildPrompt(
+    signal: Signal,
+    hits: MemoryHit[],
+    includeSystem: boolean,
+    compactSummary?: string
+  ): string {
     const parts: string[] = []
     if (includeSystem) {
       parts.push(ASSISTANT_SYSTEM_PROMPT)
+    }
+    if (compactSummary) {
+      parts.push(
+        `[对话摘要] 这是你与用户之前对话的浓缩回顾（完整历史已压缩，长期事实见[记忆]）：\n${compactSummary}`
+      )
     }
     if (hits.length > 0) {
       const lines = hits.map((h) => `- (${h.kind}) ${h.content}`).join('\n')
@@ -293,7 +364,13 @@ export class AssistantBrain {
     // tags so what we surface as the assistant's message is just the prose; the
     // tags are consumed below as actions.
     const reply = stripDirectives(raw)
-    const result: ThinkResult = { raw: reply, dispatched: [], remembered: 0, reports: [] }
+    const result: ThinkResult = {
+      raw: reply,
+      dispatched: [],
+      continued: [],
+      remembered: 0,
+      reports: []
+    }
 
     // REMEMBER first so a memory the brain just formed is stored before any
     // report references it.
@@ -325,6 +402,27 @@ export class AssistantBrain {
       }
     }
 
+    // CONTINUE — send a follow-up into an EXISTING team conversation (nudge,
+    // re-brief, answer) instead of creating a new project. Used heavily by the
+    // review loop to push a team that's already running forward.
+    for (const body of extractAll(raw, 'CONTINUE')) {
+      const parsed = safeJson<{ conversationId?: string; projectId?: string; message?: string }>(
+        body
+      )
+      if (!parsed?.message || (!parsed.conversationId && !parsed.projectId)) continue
+      try {
+        actions.emitActivity({ phase: 'tool', text: '续派已有团队' })
+        const c = await actions.continueTeam({
+          conversationId: parsed.conversationId,
+          projectId: parsed.projectId,
+          message: parsed.message
+        })
+        result.continued.push(c)
+      } catch (e) {
+        console.error('[assistant-brain] continue failed:', (e as Error).message)
+      }
+    }
+
     for (const body of extractAll(raw, 'REPORT')) {
       actions.reportToUser({
         message: body,
@@ -343,7 +441,17 @@ export class AssistantBrain {
       this.runtime = null
     }
     this.systemPromptSent = false
+    this.turnsSinceFresh = 0
+    this.transcript = []
   }
+}
+
+/** Collapse whitespace and clamp a string to `max` chars for a transcript line —
+ *  keeps the carried-over summary compact so a compaction doesn't reseed a huge
+ *  prompt. */
+function clampLine(s: string, max: number): string {
+  const flat = s.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat
 }
 
 function safeJson<T>(s: string): T | null {

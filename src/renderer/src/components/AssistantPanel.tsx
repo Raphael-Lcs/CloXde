@@ -195,6 +195,9 @@ export function AssistantPanel(): JSX.Element {
       for (const d of turn.dispatched) {
         append('system', `已为「${d.name}」创建项目并派出团队开始工作。`)
       }
+      for (const c of turn.continued) {
+        append('system', `已向「${c.name}」团队追加了新指示。`)
+      }
       if (turn.remembered > 0) {
         append('system', `记下了 ${turn.remembered} 条记忆。`)
       }
@@ -205,6 +208,7 @@ export function AssistantPanel(): JSX.Element {
         (turn.reports.length === 0 && turn.raw) ||
         turn.reports.length > 0 ||
         turn.dispatched.length > 0 ||
+        turn.continued.length > 0 ||
         turn.remembered > 0
       if (!producedSomething) {
         append('system', '助理这一轮没有给出可见回应（可能在内部用工具忙活）。可以再说一句或换个说法。')

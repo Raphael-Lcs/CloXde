@@ -105,6 +105,30 @@ export async function dispatchProject(
   return { project, conversation }
 }
 
+/** Send a follow-up message into an EXISTING team conversation, so the assistant
+ *  can nudge / re-brief / answer a team it already dispatched instead of always
+ *  spinning up a brand-new project. Resolves the target by conversationId, or
+ *  falls back to the most recent conversation of a project. Returns the
+ *  conversation's name + id for the turn summary. */
+export async function continueTeam(input: {
+  conversationId?: string
+  projectId?: string
+  message: string
+}): Promise<{ name: string; conversationId: string }> {
+  let conv: Conversation | null = null
+  if (input.conversationId) {
+    conv = conversationRepo.get(input.conversationId)
+  }
+  if (!conv && input.projectId) {
+    // listByProject is created_at DESC → [0] is the most recent team.
+    conv = conversationRepo.listByProject(input.projectId)[0] ?? null
+  }
+  if (!conv) throw new Error('target team conversation not found')
+  await conversationEngine.sendUserMessage(conv.id, input.message)
+  const project = projectRepo.get(conv.projectId)
+  return { name: project?.name ?? conv.title ?? '未命名团队', conversationId: conv.id }
+}
+
 /** Write a memory. Thin passthrough to the memory service so the assistant's
  *  action vocabulary is in one place. */
 export function remember(input: RememberInput): Promise<AssistantMemory> {
