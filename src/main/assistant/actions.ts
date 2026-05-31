@@ -156,6 +156,12 @@ export function recall(
   return getMemoryService().recall(query, opts)
 }
 
+/** Retract a memory the brain has decided is now false or superseded. Thin
+ *  passthrough so the brain's action vocabulary stays in one place. */
+export function forget(id: string): void {
+  getMemoryService().forget(id)
+}
+
 /** Surface a message to the user. Emits on the assistant bus and logs so the
  *  report survives even before a UI subscribes. */
 export function reportToUser(report: Omit<AssistantReport, 'ts'>): void {

@@ -261,6 +261,8 @@ export interface AssistantTurn {
   continued: { name: string; projectId: string; conversationId: string }[]
   /** How many memories it wrote. */
   remembered: number
+  /** How many memories it retracted (now-false / superseded). */
+  forgotten: number
   /** Messages it addressed to the user. */
   reports: string[]
 }

@@ -127,11 +127,11 @@ function extractAll(text: string, tag: string): string[] {
   return out
 }
 
-/** Remove all directive tag blocks (DISPATCH/REMEMBER/REPORT) from the brain's
- *  output, leaving just the natural-language reply to show the user. */
+/** Remove all directive tag blocks (DISPATCH/CONTINUE/REMEMBER/FORGET/REPORT)
+ *  from the brain's output, leaving just the natural-language reply. */
 function stripDirectives(text: string): string {
   return text
-    .replace(/<<(DISPATCH|CONTINUE|REMEMBER|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
+    .replace(/<<(DISPATCH|CONTINUE|REMEMBER|FORGET|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
@@ -314,6 +314,20 @@ export class AssistantBrain {
     const profileIds = new Set(profile.map((m) => m.id))
     const recalled = hits.filter((h) => !profileIds.has(h.id))
 
+    // Give every shown memory a short per-turn handle ([M1], [M2]…) so the brain
+    // can point at one to retract it via <<FORGET>>. Profile first, then recalled
+    // (the render order). The maps are turn-local: refs are meaningless across
+    // turns, so we never persist them. UUIDs would bloat the prompt and tempt the
+    // model to hallucinate ids — a tiny ordinal is unambiguous and cheap.
+    const referable = [...profile, ...recalled]
+    const refById = new Map<string, string>()
+    const idByRef = new Map<string, string>()
+    referable.forEach((m, i) => {
+      const ref = `M${i + 1}`
+      refById.set(m.id, ref)
+      idByRef.set(ref, m.id)
+    })
+
     // Full-text search the brain's OWN past thread for the user's question —
     // surfaces older exact-term context beyond the ~60 turns it hydrates and the
     // memories vector-recall covers. Only for a real user question; background
@@ -372,7 +386,8 @@ export class AssistantBrain {
         includeSystem,
         compactSummary,
         profile,
-        history
+        history,
+        refById
       )
 
       // Build content blocks: text prompt + any image/file attachments the user
@@ -403,7 +418,7 @@ export class AssistantBrain {
     // executeDirectives can do real, slow work (a DISPATCH kicks off a team
     // turn). Keep the turn "live" through it and emit 'done' only once the
     // directives have actually run, so the UI reflects the whole turn.
-    const result = await this.executeDirectives(raw, signal)
+    const result = await this.executeDirectives(raw, signal, idByRef)
     reply = result.raw
     // The transcript is the USER conversation thread carried across a
     // compaction. Background passes (review/reflection/cron) aren't part of that
@@ -444,9 +459,14 @@ export class AssistantBrain {
     includeSystem: boolean,
     compactSummary?: string,
     profile: AssistantMemory[] = [],
-    history: AssistantMessageRecord[] = []
+    history: AssistantMessageRecord[] = [],
+    refById: Map<string, string> = new Map()
   ): string {
     const parts: string[] = []
+    const tag = (id: string): string => {
+      const r = refById.get(id)
+      return r ? `[${r}] ` : ''
+    }
     if (includeSystem) {
       parts.push(ASSISTANT_SYSTEM_PROMPT)
     }
@@ -456,7 +476,7 @@ export class AssistantBrain {
       )
     }
     if (profile.length > 0) {
-      const lines = profile.map((m) => `- (${m.kind}) ${m.content}`).join('\n')
+      const lines = profile.map((m) => `- ${tag(m.id)}(${m.kind}) ${m.content}`).join('\n')
       parts.push(`[关于用户]（始终适用，务必遵守）\n${lines}`)
     }
     if (history.length > 0) {
@@ -470,7 +490,7 @@ export class AssistantBrain {
       parts.push(`[历史片段]（更早的相关对话，供参考，可能与当前无关）\n${lines}`)
     }
     if (hits.length > 0) {
-      const lines = hits.map((h) => `- (${h.kind}) ${h.content}`).join('\n')
+      const lines = hits.map((h) => `- ${tag(h.id)}(${h.kind}) ${h.content}`).join('\n')
       parts.push(`[记忆]\n${lines}`)
     } else {
       parts.push('[记忆]\n（无相关记忆）')
@@ -479,7 +499,11 @@ export class AssistantBrain {
     return parts.join('\n\n')
   }
 
-  private async executeDirectives(raw: string, signal: Signal): Promise<ThinkResult> {
+  private async executeDirectives(
+    raw: string,
+    signal: Signal,
+    idByRef: Map<string, string> = new Map()
+  ): Promise<ThinkResult> {
     // `raw` mixes the brain's natural reply with directive tag blocks. Strip the
     // tags so what we surface as the assistant's message is just the prose; the
     // tags are consumed below as actions.
@@ -489,7 +513,25 @@ export class AssistantBrain {
       dispatched: [],
       continued: [],
       remembered: 0,
+      forgotten: 0,
       reports: []
+    }
+
+    // FORGET before REMEMBER: a correction is "drop the stale one, store the new
+    // one"; retracting first means a freshly-restated fact can't be the thing we
+    // delete. Refs ([M#]) are resolved against this turn's shown memories only.
+    for (const body of extractAll(raw, 'FORGET')) {
+      const parsed = safeJson<{ ref?: string }>(body)
+      if (!parsed?.ref) continue
+      const id = idByRef.get(`M${String(parsed.ref).replace(/\D/g, '')}`)
+      if (!id) continue
+      try {
+        actions.emitActivity({ phase: 'tool', text: '撤回旧记忆' })
+        actions.forget(id)
+        result.forgotten++
+      } catch (e) {
+        console.error('[assistant-brain] forget failed:', (e as Error).message)
+      }
     }
 
     // REMEMBER first so a memory the brain just formed is stored before any

@@ -688,6 +688,12 @@ export function registerIpcHandlers(): void {
               text: `记下了 ${turn.remembered} 条记忆。`
             })
           }
+          if (turn.forgotten > 0) {
+            assistantMessageRepo.insert({
+              role: 'system',
+              text: `撤回了 ${turn.forgotten} 条过时记忆。`
+            })
+          }
         } catch (e) {
           console.error('[ipc] persist assistant turn failed:', (e as Error).message)
         }
