@@ -72,10 +72,15 @@ function renderMessageText(m: Message): string {
 }
 
 /** Build a compact snapshot of recent team activity across owned projects, and
- *  the newest message ts seen. Returns null when there's nothing to review. */
-function gatherSnapshot(): { text: string; newestTs: number } | null {
+ *  the newest message ts seen. `stuck` is true when at least one owned team is
+ *  waiting for intervention — under autopilot, status 'awaiting-user' means the
+ *  engine halted (protocol slip / crash / blocked) rather than finished, since a
+ *  completed autopilot run settles to 'ended'. That's a capability-gap the brain
+ *  should prioritize. Returns null when there's nothing to review. */
+function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | null {
   const sections: string[] = []
   let newestTs = 0
+  let stuck = false
   for (const project of ownedProjects()) {
     const convs = conversationRepo.listByProject(project.id)
     if (convs.length === 0) continue
@@ -84,6 +89,8 @@ function gatherSnapshot(): { text: string; newestTs: number } | null {
     if (msgs.length === 0) continue
     const convNewest = msgs[msgs.length - 1].ts
     if (convNewest > newestTs) newestTs = convNewest
+    const needsAttention = conv.autopilot && conv.status === 'awaiting-user'
+    if (needsAttention) stuck = true
     const lines = msgs
       .map((m) => {
         const t = renderMessageText(m)
@@ -91,12 +98,13 @@ function gatherSnapshot(): { text: string; newestTs: number } | null {
       })
       .filter(Boolean)
       .join('\n')
+    const flag = needsAttention ? ' ⚠️卡住·待你决策' : ''
     sections.push(
-      `# 项目「${project.name}」(状态 ${conv.status}, 会话ID ${conv.id})\n${lines || '  （无文本消息）'}`
+      `# 项目「${project.name}」(状态 ${conv.status}, 会话ID ${conv.id})${flag}\n${lines || '  （无文本消息）'}`
     )
   }
   if (sections.length === 0 || newestTs <= lastReviewedTs) return null
-  return { text: sections.join('\n\n'), newestTs }
+  return { text: sections.join('\n\n'), newestTs, stuck }
 }
 
 /** Run the memory decay pass at most once per PRUNE_INTERVAL_MS. Pure DB work
@@ -170,9 +178,15 @@ async function runPass(
     if (await maybeReflect(think, turnCount)) return
     const snapshot = gatherSnapshot()
     if (!snapshot) return
+    // A stuck team (halted under autopilot) is a capability-gap the brain should
+    // treat as "needs a decision now", not a routine progress check — classify
+    // the signal so the prompt can bias toward CONTINUE / intervention.
+    const intro = snapshot.stuck
+      ? '注意：下面带 ⚠️ 的团队已经卡住、在等你决策（自动模式下停在 awaiting-user 通常意味着引擎遇到协议违例/崩溃/受阻而非正常完成）。请优先处理它们。'
+      : '以下是你派出的团队的最新进展，请验收并决定下一步：'
     await think({
-      kind: 'review',
-      text: `以下是你派出的团队的最新进展，请验收并决定下一步：\n- 想推动某个**已存在**的团队继续干（补充要求、纠偏、回答它的问题），用 <<CONTINUE>>{"conversationId":"上面给的会话ID","message":"要对团队说的话"}<</CONTINUE>>。\n- 只有需要**全新**项目时才 <<DISPATCH>>。\n- 有值得告知用户的就 <<REPORT>>。\n\n${snapshot.text}`
+      kind: snapshot.stuck ? 'capability-gap' : 'review',
+      text: `${intro}\n- 想推动某个**已存在**的团队继续干（补充要求、纠偏、回答它的问题），用 <<CONTINUE>>{"conversationId":"上面给的会话ID","message":"要对团队说的话"}<</CONTINUE>>。\n- 只有需要**全新**项目时才 <<DISPATCH>>。\n- 有值得告知用户的就 <<REPORT>>。\n\n${snapshot.text}`
     })
     lastReviewedTs = snapshot.newestTs
   } catch (e) {

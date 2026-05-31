@@ -120,11 +120,20 @@ export async function continueTeam(input: {
     conv = conversationRepo.get(input.conversationId)
   }
   if (!conv && input.projectId) {
-    // listByProject is created_at DESC → [0] is the most recent team.
-    conv = conversationRepo.listByProject(input.projectId)[0] ?? null
+    // listByProject is created_at DESC. Prefer the most recent team that isn't
+    // already ended — continuing a finished team would silently revive it,
+    // which is rarely what the brain means. Fall back to the newest of any
+    // status only if every team has ended.
+    const convs = conversationRepo.listByProject(input.projectId)
+    conv = convs.find((c) => c.status !== 'ended') ?? convs[0] ?? null
   }
   if (!conv) throw new Error('target team conversation not found')
-  await conversationEngine.sendUserMessage(conv.id, input.message)
+  // Queue behind any in-flight team turn (preempt: false) instead of cutting it
+  // off — the assistant nudging a team must not interrupt work the team is
+  // actively doing; the message lands once the current cascade settles.
+  await conversationEngine.sendUserMessage(conv.id, input.message, undefined, undefined, {
+    preempt: false
+  })
   const project = projectRepo.get(conv.projectId)
   return { name: project?.name ?? conv.title ?? '未命名团队', conversationId: conv.id }
 }

@@ -64,18 +64,37 @@ export class MemoryService {
     return memoryRepo.insert({ ...input, embedding })
   }
 
-  /** Semantic recall. Returns the k memories most relevant to `query`,
-   *  nearest first, and bumps their last_used_at so the decay pass keeps
-   *  them. */
+  /** Semantic recall with composite ranking. Pure nearest-neighbour by vector
+   *  distance ignores how much the assistant trusts a memory and how fresh it
+   *  is — so a stale, low-confidence near-miss can crowd out a slightly-further
+   *  but pinned, high-confidence fact. We over-fetch by distance, then re-rank by
+   *  a blend of semantic similarity + confidence + recency (+ a pinned boost) and
+   *  keep the top k. Only the returned k are touched, so ranking doesn't keep
+   *  candidates we discarded alive against the decay pass. */
   async recall(
     query: string,
     opts?: { k?: number; kind?: MemoryKind }
   ): Promise<MemoryHit[]> {
     const k = opts?.k ?? 8
     const [embedding] = await this.embedder.embed([query])
-    const hits = memoryRepo.searchByVector(embedding, k, { kind: opts?.kind })
-    memoryRepo.touch(hits.map((h) => h.id))
-    return hits
+    // Over-fetch so re-ranking has room to promote a high-value near-miss over a
+    // closer-but-weaker hit; cap so a huge k can't pull the whole table.
+    const fetchK = Math.min(Math.max(k * 4, k), 60)
+    const candidates = memoryRepo.searchByVector(embedding, fetchK, { kind: opts?.kind })
+    const now = Date.now()
+    const ranked = candidates
+      .map((h) => ({ h, score: MemoryService.score(h, now) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k)
+      .map((r) => r.h)
+    memoryRepo.touch(ranked.map((h) => h.id))
+    return ranked
+  }
+
+  /** Composite relevance score for a recall hit. Delegates to the pure,
+   *  unit-tested `scoreMemoryHit`. */
+  private static score(hit: MemoryHit, now: number): number {
+    return scoreMemoryHit(hit, now)
   }
 
   /** Rewrite a memory's content (re-embedding it) or its metadata. */
@@ -114,6 +133,22 @@ export class MemoryService {
 }
 
 let singleton: MemoryService | null = null
+
+/** Half-life for recency decay — matches the 30-day staleness window the decay
+ *  pass uses, so "fresh enough to survive pruning" and "fresh enough to rank
+ *  well" stay aligned. */
+export const RECENCY_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000
+
+/** Pure composite relevance score for a recall hit (extracted for unit tests).
+ *  Semantic similarity dominates; confidence and recency break ties and lift
+ *  trusted/fresh facts; pinned gets a flat boost so user-anchored memories
+ *  surface reliably. Embeddings are L2-normalized, so cos = 1 − d²/2. */
+export function scoreMemoryHit(hit: MemoryHit, now: number): number {
+  const sim = Math.max(0, Math.min(1, 1 - (hit.distance * hit.distance) / 2))
+  const ageMs = now - (hit.lastUsedAt ?? hit.createdAt)
+  const recency = Math.pow(0.5, Math.max(0, ageMs) / RECENCY_HALF_LIFE_MS)
+  return 0.65 * sim + 0.2 * hit.confidence + 0.15 * recency + (hit.pinned ? 0.15 : 0)
+}
 
 export function getMemoryService(): MemoryService {
   if (!singleton) singleton = new MemoryService()
