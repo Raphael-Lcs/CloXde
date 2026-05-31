@@ -47,9 +47,9 @@ export const REFLECT_INTERVAL_MS_FOR_TEST = REFLECT_INTERVAL_MS
  *  exchanges in-session, so we just ask it to distill them — silently. No prose
  *  reply is surfaced for a 'reflection' turn (runPass discards the result), so we
  *  tell it not to chat: just emit <<REMEMBER>> lines (or nothing). */
-const REFLECTION_PROMPT = `这是一次后台自我整理（用户看不到你这轮的话，不用回复客套话）。回顾你最近与用户、与团队的交流，把其中**值得长期记住**的内容提炼成记忆，每条用一个 <<REMEMBER>>{"kind":"...","content":"一句话"}<</REMEMBER>> 记下：
+const REFLECTION_PROMPT = `这是一次后台自我整理（用户看不到你这轮的话，不用回复客套话）。回顾你最近与用户的交流，把其中**值得长期记住**的内容提炼成记忆，每条用一个 <<REMEMBER>>{"kind":"...","content":"一句话"}<</REMEMBER>> 记下：
 - 事实/偏好类：用户的偏好习惯、关于用户或项目的稳定事实、做事方式约定（kind 用 preference/fact/project/person/pattern）。
-- 技能类（kind:"skill"）：如果这轮里你或团队趟通了某个流程、找到了某件事在这台机器/这个项目里的正确做法、或踩坑后总结出可复用的步骤，就把它沉淀成一条技能——写清在什么情况下、按什么步骤、要注意什么，让下次照着就能做。
+- 技能类（kind:"skill"）：如果这轮交流里你自己趟通了某个流程、找到了某件事在这台机器/这个项目里的正确做法、或踩坑后总结出可复用的步骤，就沉淀成一条技能——写清在什么情况下、按什么步骤、要注意什么，让下次照着就能做。（团队做成的活会在验收时单独提炼，这里只管你自己的对话。）
 一句一条、去重、只记真正有长期价值的，别记流水账或临时任务细节。没有值得记的就什么都不做。`
 
 /** How many already-stored memories to show the brain during reflection, so it
@@ -283,7 +283,7 @@ async function runPass(
       : '以下是你派出的团队的最新进展，请验收并决定下一步：'
     await think({
       kind: snapshot.stuck ? 'capability-gap' : 'review',
-      text: `${intro}\n- 想推动某个**已存在**的团队继续干（补充要求、纠偏、回答它的问题），用 <<CONTINUE>>{"conversationId":"上面给的会话ID","message":"要对团队说的话"}<</CONTINUE>>。\n- 只有需要**全新**项目时才 <<DISPATCH>>。\n- 有值得告知用户的就 <<REPORT>>。\n\n${snapshot.text}`
+      text: `${intro}\n- 想推动某个**已存在**的团队继续干（补充要求、纠偏、回答它的问题），用 <<CONTINUE>>{"conversationId":"上面给的会话ID","message":"要对团队说的话"}<</CONTINUE>>。\n- 只有需要**全新**项目时才 <<DISPATCH>>。\n- 如果某个团队把一件不显然的活做成了（趟通了流程、找到了正确做法），把"怎么做成的"提炼成一条可复用技能：<<REMEMBER>>{"kind":"skill","content":"在什么情况下、按什么步骤、注意什么"}<</REMEMBER>>，让下次少走弯路。\n- 有值得告知用户的就 <<REPORT>>。\n\n${snapshot.text}`
     })
     lastReviewedTs = snapshot.newestTs
   } catch (e) {
