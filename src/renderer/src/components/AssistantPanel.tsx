@@ -317,6 +317,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
       }
       for (const c of turn.continued) {
         append('system', `已向「${c.name}」团队追加了新指示。`, {
+          projectId: c.projectId,
           conversationId: c.conversationId
         })
       }

@@ -294,7 +294,11 @@ export class AssistantBrain {
 
   private async thinkOnce(signal: Signal): Promise<ThinkResult> {
     const memory = getMemoryService()
-    const hits = await memory.recall(signal.text, { k: 6 })
+    // Reflection's signal text is a fixed instruction prompt, not a query, so
+    // embedding it and recalling returns semantic noise — and the reflection pass
+    // already injects its own dedup context. Skip recall for it; recall normally
+    // for conversational / team-activity signals.
+    const hits = signal.kind === 'reflection' ? [] : await memory.recall(signal.text, { k: 6 })
 
     const rt = this.ensureRuntime()
 

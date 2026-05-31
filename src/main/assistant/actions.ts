@@ -114,7 +114,7 @@ export async function continueTeam(input: {
   conversationId?: string
   projectId?: string
   message: string
-}): Promise<{ name: string; conversationId: string }> {
+}): Promise<{ name: string; projectId: string; conversationId: string }> {
   let conv: Conversation | null = null
   if (input.conversationId) {
     conv = conversationRepo.get(input.conversationId)
@@ -135,7 +135,11 @@ export async function continueTeam(input: {
     preempt: false
   })
   const project = projectRepo.get(conv.projectId)
-  return { name: project?.name ?? conv.title ?? '未命名团队', conversationId: conv.id }
+  return {
+    name: project?.name ?? conv.title ?? '未命名团队',
+    projectId: conv.projectId,
+    conversationId: conv.id
+  }
 }
 
 /** Write a memory. Thin passthrough to the memory service so the assistant's

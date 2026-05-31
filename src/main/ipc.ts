@@ -678,7 +678,7 @@ export function registerIpcHandlers(): void {
             assistantMessageRepo.insert({
               role: 'system',
               text: `已向「${c.name}」团队追加了新指示。`,
-              projectId: conversationRepo.get(c.conversationId)?.projectId,
+              projectId: c.projectId,
               conversationId: c.conversationId
             })
           }

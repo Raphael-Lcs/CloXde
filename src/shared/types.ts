@@ -257,7 +257,7 @@ export interface AssistantTurn {
   /** Teams it dispatched this turn. */
   dispatched: { name: string; projectId: string; conversationId: string }[]
   /** Existing teams it sent a follow-up message to this turn. */
-  continued: { name: string; conversationId: string }[]
+  continued: { name: string; projectId: string; conversationId: string }[]
   /** How many memories it wrote. */
   remembered: number
   /** Messages it addressed to the user. */
