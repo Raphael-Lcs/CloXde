@@ -474,6 +474,18 @@ export class ConversationEngine extends EventEmitter {
     this.updateConversation(slot, { primarySide })
   }
 
+  /** Whether any side of an *active* conversation is mid-turn. Reads the live
+   *  in-memory runtime (a streaming message id) rather than the persisted
+   *  status, which can be stale (e.g. stuck on 'thinking' after a crash). A
+   *  conversation that isn't loaded into a slot has no work in flight, so it's
+   *  not busy. Used by the scheduler to SKIP a fire instead of queueing it,
+   *  preventing pile-up when a turn runs longer than the cron interval. */
+  isBusy(conversationId: string): boolean {
+    const slot = this.active.get(conversationId)
+    if (!slot) return false
+    return this.allSides(slot).some((sr) => sr.streamingMessageId)
+  }
+
   async dispose(conversationId: string): Promise<void> {
     const slot = this.active.get(conversationId)
     if (!slot) return

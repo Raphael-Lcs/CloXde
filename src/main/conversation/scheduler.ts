@@ -23,11 +23,13 @@ export { parseCron, nextCronFire, computeNextFire } from './cron'
 // --- Ticker -----------------------------------------------------------------
 
 type InjectFn = (conversationId: string, text: string) => Promise<void>
+type IsBusyFn = (conversationId: string) => boolean
 
 const TICK_MS = 30_000
 
 let timer: ReturnType<typeof setInterval> | null = null
 let inject: InjectFn | null = null
+let isBusy: IsBusyFn | null = null
 
 /** Recompute nextFireAt for any schedule whose stored time is in the past or
  *  missing — collapses every missed slot into a single "fire on next tick".
@@ -47,11 +49,12 @@ async function fireDue(now: number): Promise<void> {
   if (!inject) return
   for (const s of scheduleRepo.listEnabled()) {
     if (s.nextFireAt > now) continue
-    // Recompute the next slot BEFORE injecting so a slow/failed turn can't
-    // wedge the schedule into refiring every tick.
+    // Advance nextFireAt BEFORE any skip/inject so a slow turn or an
+    // archived/missing conversation can't wedge the schedule into refiring
+    // every tick. lastFiredAt is written ONLY on a real inject (below), so the
+    // UI's "上次" reflects actual runs, not skipped slots.
     const next = computeNextFire(s.trigger, now)
     scheduleRepo.patch(s.id, {
-      lastFiredAt: now,
       nextFireAt: next ?? now + 24 * 60 * 60 * 1000,
       // A cron with no future match (or a degenerate interval) self-disables.
       ...(next === null ? { enabled: false } : {})
@@ -65,6 +68,13 @@ async function fireDue(now: number): Promise<void> {
       continue
     }
     if (conv.archivedAt !== undefined) continue
+    // Anti-pileup: if the conversation is mid-turn, SKIP this fire rather than
+    // queueing it. A turn that runs longer than the cron interval would
+    // otherwise stack several injections that all flush back-to-back when it
+    // ends — the same "don't backfill missed slots" rule we apply on startup.
+    // nextFireAt is already advanced above, so the next slot tries again.
+    if (isBusy?.(s.conversationId)) continue
+    scheduleRepo.patch(s.id, { lastFiredAt: now })
     try {
       await inject(s.conversationId, s.prompt)
     } catch (e) {
@@ -73,9 +83,10 @@ async function fireDue(now: number): Promise<void> {
   }
 }
 
-export function startScheduler(injectFn: InjectFn): void {
+export function startScheduler(injectFn: InjectFn, isBusyFn?: IsBusyFn): void {
   if (timer) return
   inject = injectFn
+  isBusy = isBusyFn ?? null
   reconcileOnStart(Date.now())
   timer = setInterval(() => {
     void fireDue(Date.now())
@@ -90,6 +101,7 @@ export function stopScheduler(): void {
     timer = null
   }
   inject = null
+  isBusy = null
 }
 
 /** Create a schedule with its first fire time computed from now. Returns the
