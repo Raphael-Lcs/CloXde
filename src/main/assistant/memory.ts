@@ -121,6 +121,25 @@ export class MemoryService {
     return memoryRepo.list(opts)
   }
 
+  /** Always-on profile: durable memories that belong in context EVERY turn, not
+   *  only when semantically recalled. Mirrors Hermes's USER.md — standing
+   *  preferences and anything the user pinned are "who you are / how to behave"
+   *  facts that a recall miss must never silently drop (e.g. "用中文"). Pinned of
+   *  any kind first, then preferences; deduped and capped. */
+  coreProfile(limit = 12): AssistantMemory[] {
+    const pinned = memoryRepo.list({ limit: 100 }).filter((m) => m.pinned)
+    const prefs = memoryRepo.list({ kind: 'preference', limit })
+    const seen = new Set<string>()
+    const out: AssistantMemory[] = []
+    for (const m of [...pinned, ...prefs]) {
+      if (seen.has(m.id)) continue
+      seen.add(m.id)
+      out.push(m)
+      if (out.length >= limit) break
+    }
+    return out
+  }
+
   /** Decay pass: drop unpinned, low-confidence memories untouched for a while.
    *  Defaults: confidence < 0.35 and not recalled in 30 days. */
   prune(opts?: { staleDays?: number; maxConfidence?: number }): number {

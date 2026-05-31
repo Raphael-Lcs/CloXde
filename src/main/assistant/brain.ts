@@ -25,7 +25,7 @@ import type {
   SessionNotification,
   ContentBlock
 } from '@agentclientprotocol/sdk'
-import type { AgentProfile, AssistantTurn, MemoryHit } from '@shared/types'
+import type { AgentProfile, AssistantMemory, AssistantTurn, MemoryHit } from '@shared/types'
 import { AcpRuntime } from '../acp/runtime'
 import { getWorkspaceDir, ensureWorkspaceDir } from '../paths'
 import { assistantMessageRepo } from '../storage/db'
@@ -300,6 +300,14 @@ export class AssistantBrain {
     // for conversational / team-activity signals.
     const hits = signal.kind === 'reflection' ? [] : await memory.recall(signal.text, { k: 6 })
 
+    // The always-on profile (pinned + standing preferences) goes in EVERY prompt,
+    // not just on a semantic hit — a recall miss must never drop "用中文" and the
+    // like. Reflection already lists everything it knows, so skip there. Dedup
+    // against recalled hits so a memory isn't shown twice.
+    const profile = signal.kind === 'reflection' ? [] : memory.coreProfile()
+    const profileIds = new Set(profile.map((m) => m.id))
+    const recalled = hits.filter((h) => !profileIds.has(h.id))
+
     const rt = this.ensureRuntime()
 
     // First turn of the process: pull the recent thread out of the DB so the
@@ -338,7 +346,7 @@ export class AssistantBrain {
       // otherwise a failed turn (e.g. adapter spawn error) would burn the flag
       // and every later turn would run with no delegator identity.
       const includeSystem = !this.systemPromptSent
-      const promptText = this.buildPrompt(signal, hits, includeSystem, compactSummary)
+      const promptText = this.buildPrompt(signal, recalled, includeSystem, compactSummary, profile)
 
       // Build content blocks: text prompt + any image/file attachments the user
       // sent. The adapter (Claude Code) supports multimodal input.
@@ -407,7 +415,8 @@ export class AssistantBrain {
     signal: Signal,
     hits: MemoryHit[],
     includeSystem: boolean,
-    compactSummary?: string
+    compactSummary?: string,
+    profile: AssistantMemory[] = []
   ): string {
     const parts: string[] = []
     if (includeSystem) {
@@ -417,6 +426,10 @@ export class AssistantBrain {
       parts.push(
         `[对话摘要] 这是你与用户之前对话的浓缩回顾（完整历史已压缩，长期事实见[记忆]）：\n${compactSummary}`
       )
+    }
+    if (profile.length > 0) {
+      const lines = profile.map((m) => `- (${m.kind}) ${m.content}`).join('\n')
+      parts.push(`[关于用户]（始终适用，务必遵守）\n${lines}`)
     }
     if (hits.length > 0) {
       const lines = hits.map((h) => `- (${h.kind}) ${h.content}`).join('\n')
