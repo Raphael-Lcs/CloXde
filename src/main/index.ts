@@ -284,14 +284,44 @@ app.on('window-all-closed', () => {
   // The user quits explicitly via the tray menu (which sets isQuitting).
 })
 
-app.on('before-quit', () => {
+let quitCleanupStarted = false
+
+app.on('before-quit', (event) => {
   // Mark quitting so the window's close listener stops swallowing the event
   // and lets the window actually close. Covers Cmd+Q on macOS, programmatic
   // app.quit() calls, and OS shutdown.
   isQuitting = true
-  void conversationEngine.disposeAll()
-  stopScheduler()
-  stopAllWatches()
-  void stopHttpServer()
-  closeStorage()
+
+  // Teardown is async (killing ACP child processes, closing the LAN server's
+  // sockets). The previous code fired these with `void` and let app.quit()
+  // race ahead — on Windows that left orphaned child processes and lingering
+  // socket handles that kept the main process alive, still holding the
+  // single-instance lock. A relaunch from the desktop shortcut then failed to
+  // acquire the lock and silently quit. So: defer the quit, run cleanup, then
+  // hard-exit. A timeout guarantees we exit even if a teardown step wedges.
+  if (quitCleanupStarted) return
+  quitCleanupStarted = true
+  event.preventDefault()
+
+  const forceExit = setTimeout(() => app.exit(0), 4000)
+
+  void (async () => {
+    try {
+      stopScheduler()
+      stopAllWatches()
+      await Promise.allSettled([
+        conversationEngine.disposeAll(),
+        stopHttpServer()
+      ])
+      closeStorage()
+    } catch (e) {
+      console.error('[quit] cleanup error:', e)
+    } finally {
+      clearTimeout(forceExit)
+      // app.exit (not quit) — quit would re-fire before-quit and bounce off
+      // the guard above; exit terminates the process immediately even if a
+      // stray handle (orphaned socket, dead child's stdio) is still open.
+      app.exit(0)
+    }
+  })()
 })

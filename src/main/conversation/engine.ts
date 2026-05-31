@@ -497,7 +497,12 @@ export class ConversationEngine extends EventEmitter {
   }
 
   async disposeAll(): Promise<void> {
-    for (const id of [...this.active.keys()]) await this.dispose(id)
+    // Parallel, not serial: each runtime.dispose() can wait up to ~1.5s for a
+    // wedged adapter to ack a cancel. Awaiting conversations one-by-one would
+    // make app shutdown take (conversations × sides × 1.5s); racing them keeps
+    // total teardown bounded to a single timeout regardless of how many are
+    // active. allSettled so one rejecting dispose() can't abort the rest.
+    await Promise.allSettled([...this.active.keys()].map((id) => this.dispose(id)))
   }
 
   /** Build a ConversationView. `withMessages` defaults to true so the
