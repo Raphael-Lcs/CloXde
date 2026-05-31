@@ -35,6 +35,7 @@ import type {
 import { AcpRuntime } from '../acp/runtime'
 import { getWorkspaceDir, ensureWorkspaceDir } from '../paths'
 import { assistantMessageRepo } from '../storage/db'
+import { nextCronFire } from '../conversation/cron'
 import { getMemoryService } from './memory'
 import * as actions from './actions'
 import { ASSISTANT_SYSTEM_PROMPT } from './prompts'
@@ -131,7 +132,7 @@ function extractAll(text: string, tag: string): string[] {
  *  from the brain's output, leaving just the natural-language reply. */
 function stripDirectives(text: string): string {
   return text
-    .replace(/<<(DISPATCH|CONTINUE|REMEMBER|FORGET|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
+    .replace(/<<(DISPATCH|CONTINUE|REMEMBER|FORGET|SCHEDULE|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
@@ -514,6 +515,7 @@ export class AssistantBrain {
       continued: [],
       remembered: 0,
       forgotten: 0,
+      scheduled: 0,
       reports: []
     }
 
@@ -543,6 +545,37 @@ export class AssistantBrain {
       actions.emitActivity({ phase: 'tool', text: '记下记忆' })
       await actions.remember({ kind, content: parsed.content, source: signal.kind })
       result.remembered++
+    }
+
+    // SCHEDULE — the brain sets a wake-up for ITSELF. `inMinutes` → one-shot
+    // relative; `cron` (5-field) → recurring. The review loop fires due reminders
+    // as a 'cron' signal. We compute the first fire time here so a bad cron expr
+    // is dropped at the source rather than wedging the ticker.
+    for (const body of extractAll(raw, 'SCHEDULE')) {
+      const parsed = safeJson<{ inMinutes?: number; cron?: string; note?: string }>(body)
+      if (!parsed) continue
+      const note = (parsed.note ?? '').trim() || '到点了，回来看看有没有要处理的。'
+      const now = Date.now()
+      let fireAt: number | null = null
+      let cron: string | undefined
+      if (typeof parsed.cron === 'string' && parsed.cron.trim()) {
+        try {
+          fireAt = nextCronFire(parsed.cron.trim(), now)
+        } catch {
+          fireAt = null
+        }
+        if (fireAt !== null) cron = parsed.cron.trim()
+      } else if (typeof parsed.inMinutes === 'number' && parsed.inMinutes > 0) {
+        fireAt = now + Math.round(parsed.inMinutes * 60_000)
+      }
+      if (fireAt === null) continue
+      try {
+        actions.emitActivity({ phase: 'tool', text: '设定提醒' })
+        actions.scheduleReminder({ fireAt, note, cron })
+        result.scheduled++
+      } catch (e) {
+        console.error('[assistant-brain] schedule failed:', (e as Error).message)
+      }
     }
 
     for (const body of extractAll(raw, 'DISPATCH')) {

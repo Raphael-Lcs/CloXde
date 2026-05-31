@@ -14,8 +14,9 @@
 // than the last review simply skips thinking.
 
 import { join } from 'node:path'
-import { projectRepo, conversationRepo, messageRepo, assistantMessageRepo } from '../storage/db'
+import { projectRepo, conversationRepo, messageRepo, assistantMessageRepo, assistantReminderRepo } from '../storage/db'
 import { conversationEngine, type InstabilityEvent } from '../conversation/engine'
+import { nextCronFire } from '../conversation/cron'
 import { getWorkspaceDir } from '../paths'
 import { getAssistantBrain, type Signal } from './brain'
 import { getMemoryService } from './memory'
@@ -256,6 +257,44 @@ async function maybeReflect(think: ThinkFn, turnCount: TurnCountFn): Promise<boo
   return true
 }
 
+/** Fire the brain's own due self-reminders. At most one per pass (each spends a
+ *  brain turn), soonest-first; advance/clear the row BEFORE thinking so a slow or
+ *  failed turn can't refire it. One-shot rows are deleted; recurring rows recompute
+ *  fire_at from the cron (self-disabling if the expr never matches again). Returns
+ *  true if it spent a brain turn, so the caller skips the rest of the pass. */
+async function maybeFireReminders(think: ThinkFn): Promise<boolean> {
+  const now = Date.now()
+  let due: ReturnType<typeof assistantReminderRepo.listDue>
+  try {
+    due = assistantReminderRepo.listDue(now)
+  } catch (e) {
+    console.error('[assistant-review] reminder scan failed:', (e as Error).message)
+    return false
+  }
+  if (due.length === 0) return false
+  const r = due[0]
+  try {
+    if (r.cron) {
+      const next = nextCronFire(r.cron, now)
+      if (next === null) assistantReminderRepo.delete(r.id)
+      else assistantReminderRepo.patch(r.id, { fireAt: next })
+    } else {
+      assistantReminderRepo.delete(r.id)
+    }
+  } catch (e) {
+    console.error('[assistant-review] reminder advance failed:', (e as Error).message)
+  }
+  try {
+    await think({
+      kind: 'cron',
+      text: `（这是你之前给自己设的提醒，现在到点了。${r.cron ? '这是个循环提醒。' : ''}做完该做的事；要给用户看的话用 <<REPORT>>，不必要就别打扰。）\n\n${r.note}`
+    })
+  } catch (e) {
+    console.error('[assistant-review] reminder fire failed:', (e as Error).message)
+  }
+  return true
+}
+
 async function runPass(
   anyBusy: AnyBusyFn,
   think: ThinkFn,
@@ -269,9 +308,11 @@ async function runPass(
   running = true
   try {
     // Reflection and team-review both spend a brain turn; run at most one per
-    // tick. Instability (a crashing底座) is the most urgent, then reflection has
-    // its own (much longer) interval gate, so most ticks fall through to review.
+    // tick. Instability (a crashing底座) is the most urgent, then a due
+    // self-reminder (the brain explicitly asked to be woken now), then reflection
+    // has its own (much longer) interval gate, so most ticks fall through to review.
     if (await maybeReportInstability(think)) return
+    if (await maybeFireReminders(think)) return
     if (await maybeReflect(think, turnCount)) return
     const snapshot = gatherSnapshot()
     if (!snapshot) return

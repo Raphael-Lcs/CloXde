@@ -694,6 +694,12 @@ export function registerIpcHandlers(): void {
               text: `撤回了 ${turn.forgotten} 条过时记忆。`
             })
           }
+          if (turn.scheduled > 0) {
+            assistantMessageRepo.insert({
+              role: 'system',
+              text: `设了 ${turn.scheduled} 个提醒，到点我会自己回来处理。`
+            })
+          }
         } catch (e) {
           console.error('[ipc] persist assistant turn failed:', (e as Error).message)
         }

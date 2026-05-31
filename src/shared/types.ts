@@ -263,8 +263,25 @@ export interface AssistantTurn {
   remembered: number
   /** How many memories it retracted (now-false / superseded). */
   forgotten: number
+  /** How many self-reminders it set this turn (wake-me-later / recurring). */
+  scheduled: number
   /** Messages it addressed to the user. */
   reports: string[]
+}
+
+/** A reminder the assistant set FOR ITSELF — a future wake-up carrying a note it
+ *  wrote. Distinct from a Schedule (which injects a prompt into a team
+ *  conversation): a reminder wakes the BRAIN with a 'cron' signal. One-shot when
+ *  `cron` is absent; recurring (and `fireAt` recomputed after each fire) when set. */
+export interface AssistantReminder {
+  id: string
+  /** Epoch ms of the next fire. */
+  fireAt: number
+  /** What the brain told itself to do/check when this fires. */
+  note: string
+  /** 5-field cron expr for a recurring reminder; absent = fire once then delete. */
+  cron?: string
+  createdAt: number
 }
 
 // --- Messages --------------------------------------------------------------

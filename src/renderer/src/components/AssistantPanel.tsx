@@ -344,6 +344,9 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
       if (turn.forgotten > 0) {
         append('system', `撤回了 ${turn.forgotten} 条过时记忆。`)
       }
+      if (turn.scheduled > 0) {
+        append('system', `设了 ${turn.scheduled} 个提醒，到点我会自己回来处理。`)
+      }
       // Never leave the user staring at silence: if this turn produced no
       // visible output at all (no prose, no report, no dispatch), say so
       // explicitly instead of looking hung.
@@ -353,7 +356,8 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
         turn.dispatched.length > 0 ||
         turn.continued.length > 0 ||
         turn.remembered > 0 ||
-        turn.forgotten > 0
+        turn.forgotten > 0 ||
+        turn.scheduled > 0
       if (!producedSomething) {
         append('system', '助理这一轮没有给出可见回应（可能在内部用工具忙活）。可以再说一句或换个说法。')
       }

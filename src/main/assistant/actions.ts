@@ -21,13 +21,14 @@ import type {
   AgentKind,
   AssistantActivity,
   AssistantMemory,
+  AssistantReminder,
   AssistantReport,
   Conversation,
   MemoryHit,
   MemoryKind,
   Project
 } from '@shared/types'
-import { conversationRepo, profileRepo, projectRepo } from '../storage/db'
+import { conversationRepo, profileRepo, projectRepo, assistantReminderRepo } from '../storage/db'
 import { conversationEngine } from '../conversation/engine'
 import { createProject } from './workspace'
 import { getMemoryService, type RememberInput } from './memory'
@@ -160,6 +161,17 @@ export function recall(
  *  passthrough so the brain's action vocabulary stays in one place. */
 export function forget(id: string): void {
   getMemoryService().forget(id)
+}
+
+/** Set a self-reminder: a future wake-up that fires a 'cron' signal back into the
+ *  brain carrying `note`. One-shot when `cron` is absent; recurring when set. The
+ *  review loop scans due reminders and fires them during a quiet window. */
+export function scheduleReminder(input: {
+  fireAt: number
+  note: string
+  cron?: string
+}): AssistantReminder {
+  return assistantReminderRepo.create(input)
 }
 
 /** Surface a message to the user. Emits on the assistant bus and logs so the

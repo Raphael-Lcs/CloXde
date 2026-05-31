@@ -8,6 +8,7 @@ import type {
   AssistantMemory,
   AssistantMessageRecord,
   AssistantMessageRole,
+  AssistantReminder,
   Conversation,
   ConversationStatus,
   MemoryHit,
@@ -944,6 +945,73 @@ export const scheduleRepo = {
   },
   delete(id: string): void {
     getDb().prepare('DELETE FROM schedules WHERE id = ?').run(id)
+  }
+}
+
+// --- Assistant self-reminders ----------------------------------------------
+//
+// The brain's own wake-ups (see migration v14). The review loop scans `listDue`
+// each pass and, for each due row, wakes the brain with a 'cron' signal carrying
+// `note`. One-shot rows are deleted after firing; recurring rows (cron set) have
+// fire_at recomputed by the caller via cron math.
+
+interface ReminderRow {
+  id: string
+  fire_at: number
+  note: string
+  cron: string | null
+  created_at: number
+}
+
+function rowToReminder(row: ReminderRow): AssistantReminder {
+  return {
+    id: row.id,
+    fireAt: row.fire_at,
+    note: row.note,
+    cron: row.cron ?? undefined,
+    createdAt: row.created_at
+  }
+}
+
+export const assistantReminderRepo = {
+  create(input: { fireAt: number; note: string; cron?: string }): AssistantReminder {
+    const id = randomUUID()
+    const now = Date.now()
+    getDb()
+      .prepare(
+        `INSERT INTO assistant_reminders (id, fire_at, note, cron, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(id, input.fireAt, input.note, input.cron ?? null, now)
+    return { id, fireAt: input.fireAt, note: input.note, cron: input.cron, createdAt: now }
+  },
+  /** Reminders whose fire time has arrived, soonest first. */
+  listDue(now: number): AssistantReminder[] {
+    const rows = getDb()
+      .prepare(
+        `SELECT id, fire_at, note, cron, created_at FROM assistant_reminders
+         WHERE fire_at <= ? ORDER BY fire_at ASC`
+      )
+      .all(now) as ReminderRow[]
+    return rows.map(rowToReminder)
+  },
+  /** All reminders, soonest first — for the UI / dedup context. */
+  list(): AssistantReminder[] {
+    const rows = getDb()
+      .prepare(
+        `SELECT id, fire_at, note, cron, created_at FROM assistant_reminders
+         ORDER BY fire_at ASC`
+      )
+      .all() as ReminderRow[]
+    return rows.map(rowToReminder)
+  },
+  patch(id: string, patch: { fireAt: number }): void {
+    getDb()
+      .prepare('UPDATE assistant_reminders SET fire_at = ? WHERE id = ?')
+      .run(patch.fireAt, id)
+  },
+  delete(id: string): void {
+    getDb().prepare('DELETE FROM assistant_reminders WHERE id = ?').run(id)
   }
 }
 

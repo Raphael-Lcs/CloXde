@@ -361,6 +361,27 @@ const MIGRATIONS: Migration[] = [
           SELECT rowid, text FROM assistant_messages;
       `)
     }
+  },
+  {
+    version: 14,
+    name: 'assistant-reminders',
+    up(db) {
+      // The brain's own wake-ups. Unlike `schedules` (which inject a prompt into a
+      // team CONVERSATION), a reminder wakes the ASSISTANT itself: the review loop
+      // fires due rows as a 'cron' signal carrying `note`. One-shot rows (cron
+      // NULL) are deleted after firing; recurring rows recompute fire_at.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS assistant_reminders (
+          id TEXT PRIMARY KEY,
+          fire_at INTEGER NOT NULL,
+          note TEXT NOT NULL,
+          cron TEXT,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_assistant_reminders_fire
+          ON assistant_reminders(fire_at);
+      `)
+    }
   }
 ]
 
