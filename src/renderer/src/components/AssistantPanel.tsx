@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AssistantActivity, AssistantReport } from '@shared/types'
+import type { AssistantActivity, AssistantMemory, AssistantReport, MemoryKind } from '@shared/types'
 
 // The standalone assistant view: a direct chat with the user-scoped assistant
 // (the layer above the team). The user talks to it here; it decides, delegates
@@ -46,6 +46,11 @@ export function AssistantPanel(): JSX.Element {
   const [liveStatus, setLiveStatus] = useState<string>('')
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null)
   const [elapsed, setElapsed] = useState(0)
+  // Memory drawer: the assistant's long-term memory, browsable so the user can
+  // see what it remembers and pin/forget entries.
+  const [memoryOpen, setMemoryOpen] = useState(false)
+  const [memories, setMemories] = useState<AssistantMemory[]>([])
+  const [memoryLoading, setMemoryLoading] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const attachIdRef = useRef(0)
 
@@ -118,6 +123,45 @@ export function AssistantPanel(): JSX.Element {
 
   const cancel = useCallback(() => {
     void window.api.assistant?.cancel()
+  }, [])
+
+  const loadMemories = useCallback(async () => {
+    if (!window.api.assistant?.listMemories) return
+    setMemoryLoading(true)
+    try {
+      const res = await window.api.assistant.listMemories(200)
+      if (res.ok) setMemories(res.data)
+    } finally {
+      setMemoryLoading(false)
+    }
+  }, [])
+
+  const toggleMemoryDrawer = useCallback(() => {
+    setMemoryOpen((open) => {
+      const next = !open
+      if (next) void loadMemories()
+      return next
+    })
+  }, [loadMemories])
+
+  const pinMemory = useCallback(
+    async (m: AssistantMemory) => {
+      if (!window.api.assistant?.pinMemory) return
+      const res = await window.api.assistant.pinMemory(m.id, !m.pinned)
+      if (res.ok) {
+        setMemories((curr) =>
+          curr.map((x) => (x.id === m.id ? { ...x, pinned: !m.pinned } : x))
+        )
+      }
+    },
+    []
+  )
+
+  const forgetMemory = useCallback(async (m: AssistantMemory) => {
+    if (!window.api.assistant?.forgetMemory) return
+    if (!window.confirm(`确定让助理忘记这条记忆吗？\n\n${m.content}`)) return
+    const res = await window.api.assistant.forgetMemory(m.id)
+    if (res.ok) setMemories((curr) => curr.filter((x) => x.id !== m.id))
   }, [])
 
   const addBlob = useCallback(async (blob: Blob) => {
@@ -269,7 +313,55 @@ export function AssistantPanel(): JSX.Element {
         <span className="assistant-sub">
           你的私人助理 · 会判断该做什么、创建项目并指挥团队，再向你回报
         </span>
+        <button
+          className="assistant-memory-toggle"
+          onClick={toggleMemoryDrawer}
+          title="查看助理记住的东西"
+        >
+          {memoryOpen ? '关闭记忆' : '记忆'}
+        </button>
       </div>
+      {memoryOpen && (
+        <div className="assistant-memory-drawer">
+          <div className="assistant-memory-drawer-head">
+            <strong>长期记忆</strong>
+            <span className="assistant-memory-count">
+              {memoryLoading ? '加载中…' : `${memories.length} 条`}
+            </span>
+            <button onClick={() => void loadMemories()} title="刷新" disabled={memoryLoading}>
+              刷新
+            </button>
+          </div>
+          <div className="assistant-memory-list">
+            {memories.length === 0 && !memoryLoading ? (
+              <div className="assistant-memory-empty">助理还没有记住任何东西。</div>
+            ) : (
+              memories.map((m) => (
+                <div key={m.id} className={`assistant-memory-item${m.pinned ? ' pinned' : ''}`}>
+                  <div className="assistant-memory-item-top">
+                    <span className="assistant-memory-kind">{memoryKindLabel(m.kind)}</span>
+                    <span className="assistant-memory-conf" title="助理对这条记忆的信心">
+                      {Math.round(m.confidence * 100)}%
+                    </span>
+                    <span className="assistant-memory-actions">
+                      <button
+                        onClick={() => void pinMemory(m)}
+                        title={m.pinned ? '取消固定（可被自动遗忘）' : '固定（永不自动遗忘）'}
+                      >
+                        {m.pinned ? '📌 已固定' : '固定'}
+                      </button>
+                      <button onClick={() => void forgetMemory(m)} title="永久删除这条记忆">
+                        忘记
+                      </button>
+                    </span>
+                  </div>
+                  <div className="assistant-memory-content">{m.content}</div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
       <div className="assistant-stream" ref={scrollRef}>
         {entries.length === 0 ? (
           <div className="assistant-empty">
@@ -368,4 +460,24 @@ function oneLine(s: string | undefined): string {
   if (!s) return ''
   const flat = s.replace(/\s+/g, ' ').trim()
   return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat
+}
+
+/** Human-readable Chinese label for a memory kind. */
+function memoryKindLabel(kind: MemoryKind): string {
+  switch (kind) {
+    case 'preference':
+      return '偏好'
+    case 'fact':
+      return '事实'
+    case 'project':
+      return '项目'
+    case 'person':
+      return '人物'
+    case 'pattern':
+      return '习惯'
+    case 'episodic':
+      return '事件'
+    default:
+      return kind
+  }
 }

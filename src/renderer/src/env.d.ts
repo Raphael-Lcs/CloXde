@@ -114,6 +114,8 @@ interface CloXdeApi {
     resetSession: () => Promise<IpcResult<true>>
     cancel: () => Promise<IpcResult<true>>
     listMemories: (limit?: number) => Promise<IpcResult<AssistantMemory[]>>
+    pinMemory: (id: string, pinned: boolean) => Promise<IpcResult<true>>
+    forgetMemory: (id: string) => Promise<IpcResult<true>>
     onReport: (cb: (report: AssistantReport) => void) => Unsubscribe
     onActivity: (cb: (activity: AssistantActivity) => void) => Unsubscribe
   }

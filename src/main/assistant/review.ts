@@ -15,7 +15,7 @@
 
 import { join } from 'node:path'
 import { projectRepo, conversationRepo, messageRepo } from '../storage/db'
-import { conversationEngine } from '../conversation/engine'
+import { conversationEngine, type InstabilityEvent } from '../conversation/engine'
 import { getWorkspaceDir } from '../paths'
 import { getAssistantBrain, type Signal } from './brain'
 import { getMemoryService } from './memory'
@@ -43,6 +43,23 @@ export const REFLECT_INTERVAL_MS_FOR_TEST = REFLECT_INTERVAL_MS
  *  reply is surfaced for a 'reflection' turn (runPass discards the result), so we
  *  tell it not to chat: just emit <<REMEMBER>> lines (or nothing). */
 const REFLECTION_PROMPT = `这是一次后台自我整理（用户看不到你这轮的话，不用回复客套话）。回顾你最近与用户的交流，把其中**值得长期记住**的内容提炼成记忆：用户的偏好/习惯、关于用户或项目的稳定事实、做事的方式约定等。每条用一个 <<REMEMBER>>{"kind":"...","content":"一句话"}<</REMEMBER>> 记下，一句一条、去重、只记真正有长期价值的，别记流水账或临时任务细节。没有值得记的就什么都不做。`
+
+/** How many already-stored memories to show the brain during reflection, so it
+ *  doesn't re-emit things it already knows. Capped so the dedup context stays a
+ *  hint, not a context-window hog. Pinned + freshest first (memoryRepo.list
+ *  ordering), which is exactly what's most likely to be restated. */
+const REFLECTION_DEDUP_CONTEXT = 40
+
+/** Build the reflection signal text, optionally prefixed with the memories the
+ *  brain has already stored. The embedding-layer upsert already folds exact
+ *  near-duplicates, but that still costs a model-emitted <<REMEMBER>> and a
+ *  re-embed; surfacing what's known lets the brain skip restating it at the
+ *  source, so reflection turns stay lean. */
+function buildReflectionPrompt(existing: { kind: string; content: string }[]): string {
+  if (existing.length === 0) return REFLECTION_PROMPT
+  const lines = existing.map((m) => `  - (${m.kind}) ${m.content}`).join('\n')
+  return `${REFLECTION_PROMPT}\n\n你**已经记住**了下面这些，别再重复记录（除非有实质性更新或纠正）：\n${lines}`
+}
 
 let timer: ReturnType<typeof setInterval> | null = null
 let running = false
@@ -138,6 +155,63 @@ export function shouldReflect(
   return currentTurns > lastTurns
 }
 
+/** How many already-stored adapter crashes (without an exhausted give-up) it
+ *  takes to escalate to the brain. A single recovered hiccup is normal under
+ *  "全自动"; a burst means the底座 is genuinely flaky and worth a look. */
+const INSTABILITY_BURST = 3
+
+/** Pure decision: is this batch of drained adapter-instability events worth
+ *  waking the brain over? Yes if any retry was *exhausted* (a turn actually
+ *  failed over), or if there's a burst of crashes even though retries recovered.
+ *  Extracted so it can be unit-tested without the engine/model. */
+export function shouldReportInstability(events: InstabilityEvent[]): boolean {
+  if (events.length === 0) return false
+  if (events.some((e) => e.exhausted)) return true
+  return events.length >= INSTABILITY_BURST
+}
+
+/** Render drained instability events into a brain signal, grouped by team so the
+ *  brain gets one block per affected conversation (with its ID for <<CONTINUE>>). */
+function describeInstability(events: InstabilityEvent[]): string {
+  const byConv = new Map<string, InstabilityEvent[]>()
+  for (const e of events) {
+    const arr = byConv.get(e.conversationId) ?? []
+    arr.push(e)
+    byConv.set(e.conversationId, arr)
+  }
+  const sections: string[] = []
+  for (const [convId, evs] of byConv) {
+    const conv = conversationRepo.get(convId)
+    const project = conv ? projectRepo.get(conv.projectId) : null
+    const name = project?.name ?? conv?.title ?? '未知项目'
+    const status = conv?.status ?? '未知'
+    const gaveUp = evs.some((e) => e.exhausted)
+    const last = evs[evs.length - 1]
+    sections.push(
+      `# 团队「${name}」(会话ID ${convId}, 当前状态 ${status})\n  适配器崩溃 ${evs.length} 次${gaveUp ? '，自动重试已用尽、该回合失败' : '（已自动重试恢复）'}；最近一次：${last.detail}`
+    )
+  }
+  return sections.join('\n\n')
+}
+
+/** Drain adapter-instability events and, if they cross the escalation bar, wake
+ *  the brain with an 'instability' signal so it can nudge the team back on track
+ *  or tell the user the底座 is shaky. Returns true if it spent a brain turn.
+ *  Highest priority of the brain-spending passes — a crashing底座 trumps routine
+ *  review or background reflection. */
+async function maybeReportInstability(think: ThinkFn): Promise<boolean> {
+  const events = conversationEngine.drainInstabilityEvents()
+  if (!shouldReportInstability(events)) return false
+  const intro =
+    '注意：下面这些团队的底层适配器进程反复崩溃/断连（不是它们自己卡住，而是运行底座在抖）。请判断是暂时性抖动还是真崩了：能 <<CONTINUE>> 接回正轨就接，救不动就 <<REPORT>> 如实告诉用户哪个团队不稳。'
+  try {
+    await think({ kind: 'instability', text: `${intro}\n\n${describeInstability(events)}` })
+  } catch (e) {
+    console.error('[assistant-review] instability report failed:', (e as Error).message)
+  }
+  return true
+}
+
 /** Run the self-distillation pass at most once per REFLECT_INTERVAL_MS, and only
  *  when the brain has had new turns since the last reflection (otherwise there's
  *  nothing new to mine and we'd burn a model turn for nothing). Returns true if
@@ -153,7 +227,15 @@ async function maybeReflect(think: ThinkFn, turnCount: TurnCountFn): Promise<boo
   lastReflectedAt = now
   lastReflectedTurns = turns
   try {
-    await think({ kind: 'reflection', text: REFLECTION_PROMPT })
+    // Show the brain what it already knows so it doesn't re-emit duplicates.
+    let prompt = REFLECTION_PROMPT
+    try {
+      const known = getMemoryService().list({ limit: REFLECTION_DEDUP_CONTEXT })
+      prompt = buildReflectionPrompt(known.map((m) => ({ kind: m.kind, content: m.content })))
+    } catch (e) {
+      console.error('[assistant-review] memory list for reflection failed:', (e as Error).message)
+    }
+    await think({ kind: 'reflection', text: prompt })
   } catch (e) {
     console.error('[assistant-review] reflection failed:', (e as Error).message)
   }
@@ -173,8 +255,9 @@ async function runPass(
   running = true
   try {
     // Reflection and team-review both spend a brain turn; run at most one per
-    // tick. Reflection has its own (much longer) interval gate, so most ticks
-    // fall through to review.
+    // tick. Instability (a crashing底座) is the most urgent, then reflection has
+    // its own (much longer) interval gate, so most ticks fall through to review.
+    if (await maybeReportInstability(think)) return
     if (await maybeReflect(think, turnCount)) return
     const snapshot = gatherSnapshot()
     if (!snapshot) return

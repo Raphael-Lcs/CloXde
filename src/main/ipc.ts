@@ -673,6 +673,33 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  ipcMain.handle(
+    IPC.AssistantPinMemory,
+    async (_e, id: unknown, pinned: unknown): Promise<IpcResult<true>> => {
+      if (typeof id !== 'string') return err('invalid memory id')
+      if (typeof pinned !== 'boolean') return err('invalid pinned flag')
+      try {
+        await getMemoryService().update(id, { pinned })
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.AssistantForgetMemory,
+    (_e, id: unknown): IpcResult<true> => {
+      if (typeof id !== 'string') return err('invalid memory id')
+      try {
+        getMemoryService().forget(id)
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
   // --- Filesystem inspector ----------------------------------------------
   ipcMain.handle(
     IPC.FsListDir,

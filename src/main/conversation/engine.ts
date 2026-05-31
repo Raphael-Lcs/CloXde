@@ -146,6 +146,21 @@ interface ActiveConversation {
   pmReportRetried: boolean
 }
 
+/** One adapter-instability occurrence the assistant review loop can drain.
+ *  `exhausted` distinguishes a recovered hiccup (retry succeeded, false) from a
+ *  give-up (retries spent, the turn actually failed over, true). */
+export interface InstabilityEvent {
+  ts: number
+  conversationId: string
+  projectId: string
+  side: Role
+  /** True when auto-retry was exhausted (the turn failed), false for a transient
+   *  crash that a retry recovered from. */
+  exhausted: boolean
+  /** Condensed adapter error message, for the report. */
+  detail: string
+}
+
 export class ConversationEngine extends EventEmitter {
   private active = new Map<string, ActiveConversation>()
   /** Concurrent startIfNeeded() calls on the same conversation must NOT
@@ -153,6 +168,13 @@ export class ConversationEngine extends EventEmitter {
    *  awaiting newSession, sees `active.get(id) === undefined`, and races.
    *  We dedupe via this in-flight promise map. */
   private starting = new Map<string, Promise<ActiveConversation>>()
+  /** Adapter-instability events (a side's ACP process crashed/disconnected and
+   *  auto-retry kicked in or was exhausted), buffered for the assistant review
+   *  loop to drain. This is the底座抖动 case — distinct from a team that "got
+   *  stuck" via a protocol slip (which surfaces as autopilot → awaiting-user).
+   *  Bounded so a crash-loop can't grow it without limit; oldest dropped first. */
+  private instabilityEvents: InstabilityEvent[] = []
+  private static readonly MAX_INSTABILITY_EVENTS = 50
 
   // --- Public API --------------------------------------------------------
 
@@ -497,6 +519,22 @@ export class ConversationEngine extends EventEmitter {
     return false
   }
 
+  /** Record an adapter-instability event (called from promptWithRetry). Bounded
+   *  ring: once past the cap, drop the oldest. */
+  private recordInstability(ev: InstabilityEvent): void {
+    this.instabilityEvents.push(ev)
+    const overflow = this.instabilityEvents.length - ConversationEngine.MAX_INSTABILITY_EVENTS
+    if (overflow > 0) this.instabilityEvents.splice(0, overflow)
+  }
+
+  /** Drain buffered adapter-instability events (read-and-clear) so the assistant
+   *  review loop reports each occurrence at most once. */
+  drainInstabilityEvents(): InstabilityEvent[] {
+    const out = this.instabilityEvents
+    this.instabilityEvents = []
+    return out
+  }
+
   async dispose(conversationId: string): Promise<void> {
     const slot = this.active.get(conversationId)
     if (!slot) return
@@ -723,13 +761,34 @@ export class ConversationEngine extends EventEmitter {
           continue
         }
 
-        const fatal =
-          attempt >= MAX_PROMPT_RETRIES ||
-          !stillOwnsSide ||
-          convGone ||
-          /disposed/i.test(msg)
-        if (fatal) throw err
+        const exhausted = attempt >= MAX_PROMPT_RETRIES
+        const fatal = exhausted || !stillOwnsSide || convGone || /disposed/i.test(msg)
+        if (fatal) {
+          // Only retry-exhaustion is "instability" worth surfacing: preemption,
+          // dispose, and conv-gone are normal lifecycle, not the底座 failing.
+          if (exhausted && stillOwnsSide && !convGone) {
+            this.recordInstability({
+              ts: Date.now(),
+              conversationId: slot.conversation.id,
+              projectId: slot.conversation.projectId,
+              side,
+              exhausted: true,
+              detail: condenseError(msg)
+            })
+          }
+          throw err
+        }
         attempt += 1
+        // A crash we're about to retry — buffer it as a (recovered-or-not yet)
+        // instability so a flaky run is visible even if the retry succeeds.
+        this.recordInstability({
+          ts: Date.now(),
+          conversationId: slot.conversation.id,
+          projectId: slot.conversation.projectId,
+          side,
+          exhausted: false,
+          detail: condenseError(msg)
+        })
         // Reset the assistant bubble to a clean slate for the retry.
         sr.toolBlockIndex.clear()
         if (sr.streamingMessage) {
