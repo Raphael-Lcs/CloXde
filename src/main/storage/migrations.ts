@@ -1,7 +1,14 @@
 import type { Database as DBType } from 'better-sqlite3'
 
-// Single-version schema. We're pre-1.0 and reset the local DB on schema change
-// for now — when we hit a stable release we'll switch to additive migrations.
+// Append-only, additive migration chain. Each schema change adds a new
+// `{version, name, up}` entry; runMigrations applies (idempotently, in order)
+// only the versions a given DB hasn't run yet. A fresh DB runs v1→latest (==
+// building the final schema); an existing DB just back-fills the gap.
+//
+// Pre-1.0 note: we may still squash this whole chain into a single init
+// migration at the next breaking schema change (when resetting local DBs is
+// acceptable anyway). Until then, never edit a shipped migration in place —
+// add a new version.
 
 interface Migration {
   version: number
