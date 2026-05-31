@@ -41,6 +41,12 @@ interface Attachment {
 
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024 // 10 MB / image, hard cap
 
+// The composer draft is mirrored here so an in-progress message survives a full
+// renderer reload (HMR in dev, or any future cause) — not just a panel remount.
+// Plain React state lives in module memory, which a page reload wipes; the chat
+// thread re-hydrates from the DB but an unsent draft has nowhere else to live.
+const DRAFT_STORAGE_KEY = 'cloxde.assistant.draft'
+
 let entrySeq = 1
 /** Monotonic local id for optimistic entries. DB-hydrated entries carry their
  *  uuid; this only needs to be unique within the session. */
@@ -67,7 +73,13 @@ function recordToEntry(r: AssistantMessageRecord): Entry {
 
 export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element {
   const [entries, setEntries] = useState<Entry[]>(cachedEntries)
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(() => {
+    try {
+      return localStorage.getItem(DRAFT_STORAGE_KEY) ?? ''
+    } catch {
+      return ''
+    }
+  })
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [sending, setSending] = useState(false)
   const [dragOver, setDragOver] = useState(false)
@@ -210,6 +222,17 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
     const el = thoughtLogRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [thoughtLog, thoughtOpen])
+
+  // Mirror the draft to localStorage so a reload doesn't lose an unsent message.
+  // Every clear path goes through setDraft(''), which removes the key here.
+  useEffect(() => {
+    try {
+      if (draft) localStorage.setItem(DRAFT_STORAGE_KEY, draft)
+      else localStorage.removeItem(DRAFT_STORAGE_KEY)
+    } catch {
+      /* storage disabled/full — draft persistence is best-effort */
+    }
+  }, [draft])
 
   const cancel = useCallback(() => {
     void window.api.assistant?.cancel()
