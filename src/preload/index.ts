@@ -5,6 +5,7 @@ import type {
   AgentProfile,
   AssistantActivity,
   AssistantMemory,
+  AssistantMessageRecord,
   AssistantReport,
   AssistantTurn,
   Conversation,
@@ -13,6 +14,7 @@ import type {
   GitStatus,
   IpcResult,
   Message,
+  MemoryKind,
   PresenceActivity,
   Project,
   Schedule,
@@ -179,10 +181,18 @@ const api = {
     cancel: (): Promise<IpcResult<true>> => ipcRenderer.invoke(IPC.AssistantCancel),
     listMemories: (limit?: number): Promise<IpcResult<AssistantMemory[]>> =>
       ipcRenderer.invoke(IPC.AssistantListMemories, limit),
+    addMemory: (kind: MemoryKind, content: string): Promise<IpcResult<AssistantMemory>> =>
+      ipcRenderer.invoke(IPC.AssistantAddMemory, kind, content),
     pinMemory: (id: string, pinned: boolean): Promise<IpcResult<true>> =>
       ipcRenderer.invoke(IPC.AssistantPinMemory, id, pinned),
     forgetMemory: (id: string): Promise<IpcResult<true>> =>
       ipcRenderer.invoke(IPC.AssistantForgetMemory, id),
+    listMessages: (limit?: number): Promise<IpcResult<AssistantMessageRecord[]>> =>
+      ipcRenderer.invoke(IPC.AssistantListMessages, limit),
+    markReportsRead: (): Promise<IpcResult<true>> =>
+      ipcRenderer.invoke(IPC.AssistantMarkReportsRead),
+    countUnreadReports: (): Promise<IpcResult<number>> =>
+      ipcRenderer.invoke(IPC.AssistantCountUnreadReports),
     onReport: (cb: (report: AssistantReport) => void): Unsubscribe =>
       on<AssistantReport>(IPC.AssistantReportEvent, cb),
     onActivity: (cb: (activity: AssistantActivity) => void): Unsubscribe =>

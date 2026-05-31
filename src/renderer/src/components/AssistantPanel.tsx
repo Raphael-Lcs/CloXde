@@ -1,15 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AssistantActivity, AssistantMemory, AssistantReport, MemoryKind } from '@shared/types'
+import type {
+  AssistantActivity,
+  AssistantMemory,
+  AssistantMessageRecord,
+  AssistantReport,
+  MemoryKind
+} from '@shared/types'
 
 // The standalone assistant view: a direct chat with the user-scoped assistant
 // (the layer above the team). The user talks to it here; it decides, delegates
 // to teams, and reports back. Proactive reports from the review loop also land
 // here, even when the user didn't just send anything.
 
+interface AssistantPanelProps {
+  /** Jump into a team conversation the assistant dispatched/continued, closing
+   *  the panel. Wired to App's jumpToConversation. */
+  onNavigate: (projectId: string, conversationId: string) => void
+}
+
 interface Entry {
-  id: number
-  role: 'user' | 'assistant' | 'system'
+  id: string
+  role: 'user' | 'assistant' | 'system' | 'report'
   text: string
+  /** Set on dispatch/continue/report rows so the entry can deep-link to the
+   *  team that produced it. */
+  projectId?: string
+  conversationId?: string
 }
 
 interface Attachment {
@@ -25,18 +41,32 @@ interface Attachment {
 
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024 // 10 MB / image, hard cap
 
-let nextId = 1
+let entrySeq = 1
+/** Monotonic local id for optimistic entries. DB-hydrated entries carry their
+ *  uuid; this only needs to be unique within the session. */
+function localId(): string {
+  return `local-${entrySeq++}`
+}
 
-// The brain is a long-lived singleton in the main process — one ACP session
-// that survives the panel mounting/unmounting (e.g. toggling assistant mode).
-// The chat history must persist the same way, so we hold it at module scope
-// instead of in component state, which would reset on every remount and make it
-// look like a brand-new session. An explicit /new is the only thing that clears
-// it (and resets the session).
-let savedEntries: Entry[] = []
+// The brain is a long-lived singleton in the main process, but the canonical
+// chat thread now lives in the DB (it must survive an app restart, not just a
+// panel remount). We keep a module-scope cache so a remount paints instantly,
+// then re-hydrate from the DB on mount so the panel reflects anything that
+// landed while it was closed (e.g. a proactive report).
+let cachedEntries: Entry[] = []
 
-export function AssistantPanel(): JSX.Element {
-  const [entries, setEntries] = useState<Entry[]>(savedEntries)
+function recordToEntry(r: AssistantMessageRecord): Entry {
+  return {
+    id: r.id,
+    role: r.role,
+    text: r.text,
+    projectId: r.projectId,
+    conversationId: r.conversationId
+  }
+}
+
+export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element {
+  const [entries, setEntries] = useState<Entry[]>(cachedEntries)
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [sending, setSending] = useState(false)
@@ -51,16 +81,42 @@ export function AssistantPanel(): JSX.Element {
   const [memoryOpen, setMemoryOpen] = useState(false)
   const [memories, setMemories] = useState<AssistantMemory[]>([])
   const [memoryLoading, setMemoryLoading] = useState(false)
+  // Manual add-memory form (inside the drawer).
+  const [addOpen, setAddOpen] = useState(false)
+  const [addKind, setAddKind] = useState<MemoryKind>('fact')
+  const [addText, setAddText] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const attachIdRef = useRef(0)
 
-  const append = useCallback((role: Entry['role'], text: string) => {
-    setEntries((curr) => {
-      const next = [...curr, { id: nextId++, role, text }]
-      savedEntries = next
-      return next
-    })
+  const append = useCallback(
+    (role: Entry['role'], text: string, nav?: { projectId?: string; conversationId?: string }) => {
+      setEntries((curr) => {
+        const next = [
+          ...curr,
+          { id: localId(), role, text, projectId: nav?.projectId, conversationId: nav?.conversationId }
+        ]
+        cachedEntries = next
+        return next
+      })
+    },
+    []
+  )
+
+  // Hydrate the thread from the DB — authoritative source that survives a
+  // restart. Called on mount and after /new, so the panel reflects exactly
+  // what's persisted (incl. reports that arrived while it was closed).
+  const loadThread = useCallback(async () => {
+    if (!window.api.assistant?.listMessages) return
+    const res = await window.api.assistant.listMessages(500)
+    if (!res.ok) return
+    const next = res.data.map(recordToEntry)
+    cachedEntries = next
+    setEntries(next)
   }, [])
+
+  useEffect(() => {
+    void loadThread()
+  }, [loadThread])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -77,7 +133,10 @@ export function AssistantPanel(): JSX.Element {
       return
     }
     const off = window.api.assistant.onReport((report: AssistantReport) => {
-      append('assistant', report.message)
+      append('report', report.message, {
+        projectId: report.projectId,
+        conversationId: report.conversationId
+      })
     })
     return off
   }, [append])
@@ -164,6 +223,20 @@ export function AssistantPanel(): JSX.Element {
     if (res.ok) setMemories((curr) => curr.filter((x) => x.id !== m.id))
   }, [])
 
+  const submitAddMemory = useCallback(async () => {
+    const content = addText.trim()
+    if (!content || !window.api.assistant?.addMemory) return
+    const res = await window.api.assistant.addMemory(addKind, content)
+    if (res.ok) {
+      setAddText('')
+      setAddOpen(false)
+      // The new memory is pinned + full-confidence; surface it at the top.
+      setMemories((curr) => [res.data, ...curr.filter((m) => m.id !== res.data.id)])
+    } else {
+      window.alert(`添加失败：${res.error}`)
+    }
+  }, [addText, addKind])
+
   const addBlob = useCallback(async (blob: Blob) => {
     if (!blob.type.startsWith('image/')) return
     if (blob.size > MAX_ATTACHMENT_BYTES) {
@@ -207,7 +280,7 @@ export function AssistantPanel(): JSX.Element {
       setDraft('')
       setAttachments([])
       const res = await window.api.assistant.resetSession()
-      savedEntries = []
+      cachedEntries = []
       setEntries([])
       if (res.ok) {
         append('system', '已开启新会话——助理已忘记之前的上下文。')
@@ -237,10 +310,15 @@ export function AssistantPanel(): JSX.Element {
         append('assistant', turn.raw)
       }
       for (const d of turn.dispatched) {
-        append('system', `已为「${d.name}」创建项目并派出团队开始工作。`)
+        append('system', `已为「${d.name}」创建项目并派出团队开始工作。`, {
+          projectId: d.projectId,
+          conversationId: d.conversationId
+        })
       }
       for (const c of turn.continued) {
-        append('system', `已向「${c.name}」团队追加了新指示。`)
+        append('system', `已向「${c.name}」团队追加了新指示。`, {
+          conversationId: c.conversationId
+        })
       }
       if (turn.remembered > 0) {
         append('system', `记下了 ${turn.remembered} 条记忆。`)
@@ -328,10 +406,40 @@ export function AssistantPanel(): JSX.Element {
             <span className="assistant-memory-count">
               {memoryLoading ? '加载中…' : `${memories.length} 条`}
             </span>
+            <button onClick={() => setAddOpen((v) => !v)} title="手动添加一条记忆">
+              {addOpen ? '取消' : '+ 添加'}
+            </button>
             <button onClick={() => void loadMemories()} title="刷新" disabled={memoryLoading}>
               刷新
             </button>
           </div>
+          {addOpen && (
+            <div className="assistant-memory-add">
+              <select
+                value={addKind}
+                onChange={(e) => setAddKind(e.target.value as MemoryKind)}
+              >
+                <option value="preference">偏好</option>
+                <option value="fact">事实</option>
+                <option value="project">项目</option>
+                <option value="person">人物</option>
+                <option value="pattern">习惯</option>
+                <option value="episodic">事件</option>
+              </select>
+              <input
+                type="text"
+                value={addText}
+                placeholder="让助理记住的一句话…"
+                onChange={(e) => setAddText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void submitAddMemory()
+                }}
+              />
+              <button className="primary" onClick={() => void submitAddMemory()} disabled={!addText.trim()}>
+                记住
+              </button>
+            </div>
+          )}
           <div className="assistant-memory-list">
             {memories.length === 0 && !memoryLoading ? (
               <div className="assistant-memory-empty">助理还没有记住任何东西。</div>
@@ -370,11 +478,20 @@ export function AssistantPanel(): JSX.Element {
             输入 /new 可开启全新会话。
           </div>
         ) : (
-          entries.map((e) => (
-            <div key={e.id} className={`assistant-msg role-${e.role}`}>
-              {e.text}
-            </div>
-          ))
+          entries.map((e) => {
+            const canNav = !!e.conversationId && !!e.projectId
+            return (
+              <div
+                key={e.id}
+                className={`assistant-msg role-${e.role}${canNav ? ' navigable' : ''}`}
+                onClick={canNav ? () => onNavigate(e.projectId!, e.conversationId!) : undefined}
+                title={canNav ? '点击查看这个团队' : undefined}
+              >
+                {e.text}
+                {canNav && <span className="assistant-msg-jump">↗ 打开团队</span>}
+              </div>
+            )
+          })
         )}
         {sending && (
           <div className="assistant-live">

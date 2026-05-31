@@ -87,6 +87,10 @@ export function App(): JSX.Element {
   // Standalone assistant view — the user-scoped layer above the team. When
   // open, it replaces the project/conversation main area.
   const [assistantOpen, setAssistantOpen] = useState(false)
+  // Unread proactive reports from the assistant's review loop. Drives a count
+  // badge on the titlebar assistant button so the user notices a report even
+  // when the panel is closed. Cleared when the panel is opened.
+  const [unreadReports, setUnreadReports] = useState(0)
   // Attention loop: which conversations need the user, surfaced as a titlebar
   // badge + transient toasts. Lets the user walk away while autopilot grinds
   // and only get pulled back when a run stops for them.
@@ -391,6 +395,48 @@ export function App(): JSX.Element {
     [activeProjectId, handleSelectProject]
   )
 
+  // Unread-report badge: seed from the DB on launch, then bump on each live
+  // report — but only while the panel is closed. A report that arrives with the
+  // panel open is seen immediately, so it never counts as unread.
+  useEffect(() => {
+    if (!window.api.assistant?.countUnreadReports) return
+    void window.api.assistant.countUnreadReports().then((res) => {
+      if (res.ok) setUnreadReports(res.data)
+    })
+  }, [])
+  useEffect(() => {
+    if (!window.api.assistant?.onReport) return
+    return window.api.assistant.onReport(() => {
+      setAssistantOpen((open) => {
+        if (open) {
+          // Seen live — keep the DB in sync so it isn't recounted on restart.
+          void window.api.assistant?.markReportsRead?.()
+        } else {
+          setUnreadReports((n) => n + 1)
+        }
+        return open
+      })
+    })
+  }, [])
+
+  // Opening the panel marks reports seen — clear the badge and persist it.
+  const openAssistant = useCallback((open: boolean) => {
+    setAssistantOpen(open)
+    if (open) {
+      setUnreadReports(0)
+      void window.api.assistant?.markReportsRead?.()
+    }
+  }, [])
+
+  // Navigation from the assistant panel into a dispatched/continued team.
+  const navigateFromAssistant = useCallback(
+    (projectId: string, convId: string) => {
+      setAssistantOpen(false)
+      void jumpToConversation(projectId, convId)
+    },
+    [jumpToConversation]
+  )
+
   // Conversations (across all loaded projects) currently waiting on the user.
   const waitingConversations = useMemo(() => {
     const out: { projectId: string; projectName: string; conv: Conversation }[] = []
@@ -568,11 +614,14 @@ export function App(): JSX.Element {
         <div className="spacer" />
         <button
           className={`titlebar-icon ${assistantOpen ? 'active' : ''}`}
-          onClick={() => setAssistantOpen((v) => !v)}
+          onClick={() => openAssistant(!assistantOpen)}
           title="助理（在团队之上、了解你的私人助理）"
           aria-label="助理"
         >
           <AssistantIcon />
+          {unreadReports > 0 && !assistantOpen && (
+            <span className="titlebar-icon-badge">{unreadReports > 9 ? '9+' : unreadReports}</span>
+          )}
         </button>
         {waitingConversations.length > 0 && (
           <div className="attention-wrap">
@@ -674,7 +723,7 @@ export function App(): JSX.Element {
         />
         <main className="main">
           {assistantOpen ? (
-            <AssistantPanel />
+            <AssistantPanel onNavigate={navigateFromAssistant} />
           ) : !activeProject ? (
             <EmptyHero onOpen={() => void handleOpenFolder()} />
           ) : !conversation ? (

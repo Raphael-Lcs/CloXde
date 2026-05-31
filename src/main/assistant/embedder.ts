@@ -65,13 +65,22 @@ export class LocalEmbedder implements Embedder {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private getExtractor(): Promise<any> {
     if (!this.extractorPromise) {
-      this.extractorPromise = import('@huggingface/transformers').then((tf) => {
-        // huggingface.co is unreachable on some networks (e.g. mainland China),
-        // so default to a mirror; HF_ENDPOINT overrides. The model is cached on
-        // disk after the first download, so this only matters on first run.
-        tf.env.remoteHost = process.env.HF_ENDPOINT || 'https://hf-mirror.com'
-        return tf.pipeline('feature-extraction', LocalEmbedder.MODEL)
-      })
+      this.extractorPromise = import('@huggingface/transformers')
+        .then((tf) => {
+          // huggingface.co is unreachable on some networks (e.g. mainland
+          // China), so default to a mirror; HF_ENDPOINT overrides. The model is
+          // cached on disk after the first download, so this only matters on
+          // first run.
+          tf.env.remoteHost = process.env.HF_ENDPOINT || 'https://hf-mirror.com'
+          return tf.pipeline('feature-extraction', LocalEmbedder.MODEL)
+        })
+        .catch((err) => {
+          // Don't cache the rejection — a transient first-run failure (network
+          // blip during the model download) must not poison every later call.
+          // Clearing the promise lets the next embed() retry the load.
+          this.extractorPromise = null
+          throw err
+        })
     }
     return this.extractorPromise
   }
@@ -87,25 +96,52 @@ export class LocalEmbedder implements Embedder {
 
 let singleton: Embedder | null = null
 
-/** The process-wide embedder. Tries the local model once; if it fails to
- *  load (missing dep, offline first-run, native error) it logs and falls back
- *  to the hash embedder so memory still functions, just without semantics. */
+/** Cool-down after a failed local-model load before we try again, instead of
+ *  re-attempting the (slow) load on every single embed call. */
+const EMBED_RETRY_BACKOFF_MS = 60_000
+
+/** The process-wide embedder. Prefers the local model, but unlike a one-shot
+ *  latch it stays *retryable*: a transient load failure (offline first-run,
+ *  network blip during the model download) serves the current call from the
+ *  hash fallback and schedules a retry, rather than permanently degrading the
+ *  whole session to semantics-free recall. Once the local model proves it
+ *  loads, we pin to it directly. */
 export function getEmbedder(): Embedder {
   if (singleton) return singleton
   const local = new LocalEmbedder()
-  // Probe lazily on first embed; wrap so a load failure degrades gracefully.
+  const hash = new HashEmbedder()
+  let localReady = false
+  let nextRetryAt = 0
   singleton = {
     dimension: EMBED_DIM,
     async embed(texts: string[]): Promise<Float32Array[]> {
+      if (localReady) return local.embed(texts)
+      // In the cool-down after a recent failure: serve from hash without paying
+      // the model-load attempt again.
+      if (Date.now() < nextRetryAt) return hash.embed(texts)
       try {
-        return await local.embed(texts)
+        const out = await local.embed(texts)
+        localReady = true // proven good — skip the try/catch from here on
+        return out
       } catch (err) {
-        console.error('[embedder] local model failed, falling back to hash:', err)
-        const fallback = new HashEmbedder()
-        singleton = fallback
-        return fallback.embed(texts)
+        console.error(
+          '[embedder] local model failed; using hash this call, will retry later:',
+          err
+        )
+        nextRetryAt = Date.now() + EMBED_RETRY_BACKOFF_MS
+        return hash.embed(texts)
       }
     }
   }
   return singleton
+}
+
+/** Kick off the local model load in the background at app startup so the first
+ *  real recall isn't blocked on a cold download. Errors are swallowed — the
+ *  retryable fallback in getEmbedder handles them; this is just a head start so
+ *  the model is warm by the time the assistant needs it. */
+export function warmupEmbedder(): void {
+  void getEmbedder()
+    .embed(['warmup'])
+    .catch(() => undefined)
 }

@@ -46,8 +46,12 @@ export const IPC = {
   AssistantResetSession: 'assistant:reset-session', // /new — dispose the brain's ACP session so the next turn starts fresh
   AssistantCancel: 'assistant:cancel', // interrupt the in-flight brain turn
   AssistantListMemories: 'assistant:list-memories',
+  AssistantAddMemory: 'assistant:add-memory', // manually store a memory (user-authored, pinned)
   AssistantPinMemory: 'assistant:pin-memory', // toggle a memory's pinned flag (pinned = never auto-pruned)
   AssistantForgetMemory: 'assistant:forget-memory', // delete a memory permanently
+  AssistantListMessages: 'assistant:list-messages', // hydrate the panel's persisted chat thread
+  AssistantMarkReportsRead: 'assistant:mark-reports-read', // clear the unread-report badge
+  AssistantCountUnreadReports: 'assistant:count-unread-reports', // titlebar badge count
   AssistantReportEvent: 'assistant:report', // main → renderer, proactive AssistantReport
   AssistantActivityEvent: 'assistant:activity', // main → renderer, live turn progress (AssistantActivity)
 

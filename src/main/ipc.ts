@@ -6,6 +6,7 @@ import type {
   AgentProfile,
   AssistantActivity,
   AssistantMemory,
+  AssistantMessageRecord,
   AssistantReport,
   AssistantTurn,
   Conversation,
@@ -14,13 +15,14 @@ import type {
   GitStatus,
   IpcResult,
   Message,
+  MemoryKind,
   Project,
   Schedule,
   ScheduleTrigger,
   Side
 } from '@shared/types'
 import { IPC } from '@shared/ipc-channels'
-import { conversationRepo, getDb, messageRepo, profileRepo, projectRepo, scheduleRepo } from './storage/db'
+import { conversationRepo, getDb, messageRepo, profileRepo, projectRepo, scheduleRepo, assistantMessageRepo } from './storage/db'
 import { conversationEngine } from './conversation/engine'
 import { createSchedule, updateSchedule } from './conversation/scheduler'
 import { getAssistantBrain } from './assistant/brain'
@@ -48,6 +50,10 @@ function isAgentKind(v: unknown): v is AgentKind {
 }
 function isSide(v: unknown): v is Side {
   return v === 'architect' || v === 'executor'
+}
+const MEMORY_KINDS: MemoryKind[] = ['preference', 'fact', 'project', 'person', 'pattern', 'episodic']
+function isMemoryKind(v: unknown): v is MemoryKind {
+  return typeof v === 'string' && (MEMORY_KINDS as string[]).includes(v)
 }
 
 /** Validate an untrusted ScheduleTrigger from the renderer/IPC boundary.
@@ -110,6 +116,19 @@ export function registerIpcHandlers(): void {
 
   // The assistant's proactive reports (from the review loop) → renderer.
   assistantBus.on('report', (report: AssistantReport) => {
+    // Persist as an unread 'report' row so the thread survives restart and the
+    // titlebar badge has something to count.
+    try {
+      assistantMessageRepo.insert({
+        role: 'report',
+        text: report.message,
+        projectId: report.projectId,
+        conversationId: report.conversationId,
+        read: false
+      })
+    } catch (e) {
+      console.error('[ipc] persist assistant report failed:', (e as Error).message)
+    }
     broadcast(IPC.AssistantReportEvent, report)
   })
 
@@ -625,12 +644,53 @@ export function registerIpcHandlers(): void {
           typeof (a as { data?: unknown }).data === 'string' &&
           typeof (a as { mimeType?: unknown }).mimeType === 'string'
       )
+      const clean = text.trim()
+      // Persist the user turn up front so it lands in the thread (and survives a
+      // restart) the instant it's sent, ahead of the brain's reply. The brain's
+      // own outputs are persisted below once the turn settles.
+      try {
+        assistantMessageRepo.insert({ role: 'user', text: clean })
+      } catch (e) {
+        console.error('[ipc] persist assistant user msg failed:', (e as Error).message)
+      }
       try {
         const turn = await getAssistantBrain().think({
           kind: 'user-message',
-          text: text.trim(),
+          text: clean,
           attachments: atts
         })
+        // Persist the brain's visible outputs as the single writer. REPORTs are
+        // already persisted by the assistantBus subscription (they fire mid-turn
+        // through reportToUser), so we skip them here to avoid a double row.
+        try {
+          if (turn.reports.length === 0 && turn.raw) {
+            assistantMessageRepo.insert({ role: 'assistant', text: turn.raw })
+          }
+          for (const d of turn.dispatched) {
+            assistantMessageRepo.insert({
+              role: 'system',
+              text: `已为「${d.name}」创建项目并派出团队开始工作。`,
+              projectId: d.projectId,
+              conversationId: d.conversationId
+            })
+          }
+          for (const c of turn.continued) {
+            assistantMessageRepo.insert({
+              role: 'system',
+              text: `已向「${c.name}」团队追加了新指示。`,
+              projectId: conversationRepo.get(c.conversationId)?.projectId,
+              conversationId: c.conversationId
+            })
+          }
+          if (turn.remembered > 0) {
+            assistantMessageRepo.insert({
+              role: 'system',
+              text: `记下了 ${turn.remembered} 条记忆。`
+            })
+          }
+        } catch (e) {
+          console.error('[ipc] persist assistant turn failed:', (e as Error).message)
+        }
         return ok(turn)
       } catch (e) {
         return err(`助理处理失败：${(e as Error).message}`)
@@ -646,6 +706,13 @@ export function registerIpcHandlers(): void {
       // brain otherwise keeps one long-lived session across mode toggles.
       try {
         await getAssistantBrain().dispose()
+        // /new also wipes the persisted thread so the panel hydrates empty —
+        // the visible history must reset alongside the brain's context.
+        try {
+          assistantMessageRepo.clear()
+        } catch (e) {
+          console.error('[ipc] clear assistant messages failed:', (e as Error).message)
+        }
         return ok(true)
       } catch (e) {
         return err((e as Error).message)
@@ -694,6 +761,64 @@ export function registerIpcHandlers(): void {
       try {
         getMemoryService().forget(id)
         return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.AssistantAddMemory,
+    async (_e, kind: unknown, content: unknown): Promise<IpcResult<AssistantMemory>> => {
+      const text = typeof content === 'string' ? content.trim() : ''
+      if (!text) return err('empty memory content')
+      if (!isMemoryKind(kind)) return err('invalid memory kind')
+      try {
+        // User-authored memories are pinned (never auto-pruned) and full
+        // confidence — the user asserted them directly.
+        const m = await getMemoryService().remember({
+          kind,
+          content: text,
+          source: 'manual',
+          confidence: 1,
+          pinned: true
+        })
+        return ok(m)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.AssistantListMessages,
+    (_e, limit: unknown): IpcResult<AssistantMessageRecord[]> => {
+      const n = typeof limit === 'number' && limit > 0 ? Math.floor(limit) : 500
+      try {
+        return ok(assistantMessageRepo.list(n))
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.AssistantMarkReportsRead,
+    (): IpcResult<true> => {
+      try {
+        assistantMessageRepo.markReportsRead()
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.AssistantCountUnreadReports,
+    (): IpcResult<number> => {
+      try {
+        return ok(assistantMessageRepo.countUnreadReports())
       } catch (e) {
         return err((e as Error).message)
       }

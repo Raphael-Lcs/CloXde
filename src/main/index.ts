@@ -6,6 +6,7 @@ import { registerIpcHandlers } from './ipc'
 import { conversationEngine } from './conversation/engine'
 import { startScheduler, stopScheduler } from './conversation/scheduler'
 import { startAssistantReview, stopAssistantReview } from './assistant/review'
+import { warmupEmbedder } from './assistant/embedder'
 import { getAssistantBrain } from './assistant/brain'
 import { stopAllWatches } from './fs/inspector'
 import { startHttpServer, stopHttpServer } from './server/http-server'
@@ -230,6 +231,11 @@ app.whenReady().then(() => {
   // dispatched and decides next steps. Distinct from the scheduler — this wakes
   // the assistant brain, not a team conversation.
   startAssistantReview()
+
+  // Warm the local embedding model in the background so the first memory recall
+  // isn't blocked on a cold model download. Failures here are harmless — the
+  // embedder retries (or falls back to hashing) on demand.
+  warmupEmbedder()
 
   // Start the LAN HTTP+WS companion server so the Android tablet App can
   // talk to this desktop instance. The port is configurable via env so power

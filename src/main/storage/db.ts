@@ -6,6 +6,8 @@ import type {
   AgentKind,
   AgentProfile,
   AssistantMemory,
+  AssistantMessageRecord,
+  AssistantMessageRole,
   Conversation,
   ConversationStatus,
   MemoryHit,
@@ -1170,5 +1172,93 @@ export const memoryRepo = {
       }
     })()
     return victims.length
+  }
+}
+
+// --- Assistant messages (the steward's own persisted chat thread) ----------
+
+interface AssistantMessageRow {
+  id: string
+  role: AssistantMessageRole
+  text: string
+  project_id: string | null
+  conversation_id: string | null
+  read: number
+  ts: number
+}
+
+function rowToAssistantMessage(row: AssistantMessageRow): AssistantMessageRecord {
+  return {
+    id: row.id,
+    role: row.role,
+    text: row.text,
+    projectId: row.project_id ?? undefined,
+    conversationId: row.conversation_id ?? undefined,
+    read: row.read !== 0,
+    ts: row.ts
+  }
+}
+
+export const assistantMessageRepo = {
+  insert(input: {
+    role: AssistantMessageRole
+    text: string
+    projectId?: string
+    conversationId?: string
+    read?: boolean
+  }): AssistantMessageRecord {
+    const id = randomUUID()
+    const ts = Date.now()
+    // Reports default to unread (drives the titlebar badge); everything else
+    // is born read.
+    const read = input.read ?? input.role !== 'report'
+    getDb()
+      .prepare(
+        `INSERT INTO assistant_messages
+           (id, role, text, project_id, conversation_id, read, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.role,
+        input.text,
+        input.projectId ?? null,
+        input.conversationId ?? null,
+        read ? 1 : 0,
+        ts
+      )
+    return {
+      id,
+      role: input.role,
+      text: input.text,
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      read,
+      ts
+    }
+  },
+  /** Oldest-first so the panel can render the thread top-to-bottom. */
+  list(limit = 500): AssistantMessageRecord[] {
+    const rows = getDb()
+      .prepare(
+        `SELECT * FROM (
+           SELECT * FROM assistant_messages ORDER BY ts DESC LIMIT ?
+         ) ORDER BY ts ASC`
+      )
+      .all(limit) as AssistantMessageRow[]
+    return rows.map(rowToAssistantMessage)
+  },
+  markReportsRead(): void {
+    getDb().prepare(`UPDATE assistant_messages SET read = 1 WHERE role = 'report' AND read = 0`).run()
+  },
+  countUnreadReports(): number {
+    const row = getDb()
+      .prepare(`SELECT COUNT(*) AS n FROM assistant_messages WHERE role = 'report' AND read = 0`)
+      .get() as { n: number }
+    return row.n
+  },
+  /** Wipe the whole thread — used by /new (session reset). */
+  clear(): void {
+    getDb().prepare('DELETE FROM assistant_messages').run()
   }
 }

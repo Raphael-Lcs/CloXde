@@ -287,6 +287,35 @@ const MIGRATIONS: Migration[] = [
         );
       `)
     }
+  },
+  {
+    version: 12,
+    name: 'assistant-messages',
+    up(db) {
+      // The assistant's own conversation thread — the user-scoped管家's chat with
+      // the user, plus its proactive reports. Separate from team `messages`
+      // (per-conversation): there is exactly one assistant, and its history must
+      // survive an app restart so the panel isn't blank every launch.
+      //
+      // role: 'user' | 'assistant' | 'system' | 'report'. project_id/
+      // conversation_id are set on report / dispatch / continue rows so the UI
+      // can link straight to the team. `read` only matters for 'report' rows —
+      // it backs the titlebar unread badge (0 = unseen).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS assistant_messages (
+          id TEXT PRIMARY KEY,
+          role TEXT NOT NULL,
+          text TEXT NOT NULL,
+          project_id TEXT,
+          conversation_id TEXT,
+          read INTEGER NOT NULL DEFAULT 1,
+          ts INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_assistant_messages_ts ON assistant_messages(ts);
+        CREATE INDEX IF NOT EXISTS idx_assistant_messages_unread
+          ON assistant_messages(role, read);
+      `)
+    }
   }
 ]
 

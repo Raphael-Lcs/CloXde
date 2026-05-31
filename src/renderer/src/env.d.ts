@@ -7,6 +7,7 @@ import type {
   AgentProfile,
   AssistantActivity,
   AssistantMemory,
+  AssistantMessageRecord,
   AssistantReport,
   AssistantTurn,
   Conversation,
@@ -15,6 +16,7 @@ import type {
   GitStatus,
   IpcResult,
   Message,
+  MemoryKind,
   PresenceActivity,
   Project,
   Schedule,
@@ -114,8 +116,12 @@ interface CloXdeApi {
     resetSession: () => Promise<IpcResult<true>>
     cancel: () => Promise<IpcResult<true>>
     listMemories: (limit?: number) => Promise<IpcResult<AssistantMemory[]>>
+    addMemory: (kind: MemoryKind, content: string) => Promise<IpcResult<AssistantMemory>>
     pinMemory: (id: string, pinned: boolean) => Promise<IpcResult<true>>
     forgetMemory: (id: string) => Promise<IpcResult<true>>
+    listMessages: (limit?: number) => Promise<IpcResult<AssistantMessageRecord[]>>
+    markReportsRead: () => Promise<IpcResult<true>>
+    countUnreadReports: () => Promise<IpcResult<number>>
     onReport: (cb: (report: AssistantReport) => void) => Unsubscribe
     onActivity: (cb: (activity: AssistantActivity) => void) => Unsubscribe
   }

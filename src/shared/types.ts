@@ -220,6 +220,25 @@ export interface AssistantReport {
   conversationId?: string
 }
 
+export type AssistantMessageRole = 'user' | 'assistant' | 'system' | 'report'
+
+/** A persisted line in the assistant's own conversation thread. Unlike team
+ *  messages (per-conversation), these belong to the single user-scoped assistant
+ *  and survive app restarts, so the管家's visible history isn't lost on quit.
+ *  'report' rows carry the unread flag that drives the titlebar badge; system
+ *  rows for a dispatch/continue carry the team's ids so the UI can link to it. */
+export interface AssistantMessageRecord {
+  id: string
+  role: AssistantMessageRole
+  text: string
+  /** Set on report / dispatch / continue rows so the UI can jump to the team. */
+  projectId?: string
+  conversationId?: string
+  /** Only meaningful for 'report' rows — false until the user has seen it. */
+  read: boolean
+  ts: number
+}
+
 /** Live progress of an in-flight assistant turn, streamed so the UI can show
  *  the brain is actually working (thinking / using a tool / blocked) instead of
  *  a dead "thinking…" spinner. Pushed over AssistantActivityEvent. */
