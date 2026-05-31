@@ -47,7 +47,10 @@ export const REFLECT_INTERVAL_MS_FOR_TEST = REFLECT_INTERVAL_MS
  *  exchanges in-session, so we just ask it to distill them — silently. No prose
  *  reply is surfaced for a 'reflection' turn (runPass discards the result), so we
  *  tell it not to chat: just emit <<REMEMBER>> lines (or nothing). */
-const REFLECTION_PROMPT = `这是一次后台自我整理（用户看不到你这轮的话，不用回复客套话）。回顾你最近与用户的交流，把其中**值得长期记住**的内容提炼成记忆：用户的偏好/习惯、关于用户或项目的稳定事实、做事的方式约定等。每条用一个 <<REMEMBER>>{"kind":"...","content":"一句话"}<</REMEMBER>> 记下，一句一条、去重、只记真正有长期价值的，别记流水账或临时任务细节。没有值得记的就什么都不做。`
+const REFLECTION_PROMPT = `这是一次后台自我整理（用户看不到你这轮的话，不用回复客套话）。回顾你最近与用户、与团队的交流，把其中**值得长期记住**的内容提炼成记忆，每条用一个 <<REMEMBER>>{"kind":"...","content":"一句话"}<</REMEMBER>> 记下：
+- 事实/偏好类：用户的偏好习惯、关于用户或项目的稳定事实、做事方式约定（kind 用 preference/fact/project/person/pattern）。
+- 技能类（kind:"skill"）：如果这轮里你或团队趟通了某个流程、找到了某件事在这台机器/这个项目里的正确做法、或踩坑后总结出可复用的步骤，就把它沉淀成一条技能——写清在什么情况下、按什么步骤、要注意什么，让下次照着就能做。
+一句一条、去重、只记真正有长期价值的，别记流水账或临时任务细节。没有值得记的就什么都不做。`
 
 /** How many already-stored memories to show the brain during reflection, so it
  *  doesn't re-emit things it already knows. Capped so the dedup context stays a

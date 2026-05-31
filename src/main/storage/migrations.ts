@@ -266,7 +266,7 @@ const MIGRATIONS: Migration[] = [
         CREATE TABLE IF NOT EXISTS assistant_memories (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           uuid TEXT NOT NULL UNIQUE,
-          /* 'preference' | 'fact' | 'project' | 'person' | 'pattern' | 'episodic' */
+          /* 'preference' | 'fact' | 'project' | 'person' | 'pattern' | 'episodic' | 'skill' */
           kind TEXT NOT NULL,
           content TEXT NOT NULL,
           /* provenance, e.g. 'distilled:<conversationId>' | 'manual' | 'observed' */

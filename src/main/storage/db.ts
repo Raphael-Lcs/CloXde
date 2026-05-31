@@ -1155,10 +1155,12 @@ export const memoryRepo = {
    *  recalled since `staleBefore`. Returns the number removed. */
   pruneStale(opts: { staleBefore: number; maxConfidence: number }): number {
     const db = getDb()
+    // Skills are exempt alongside pinned: procedural know-how can recur after a
+    // long gap, so "unused for 30d" isn't a signal it's worthless.
     const victims = db
       .prepare(
         `SELECT id FROM assistant_memories
-         WHERE pinned = 0 AND confidence < ?
+         WHERE pinned = 0 AND kind != 'skill' AND confidence < ?
            AND COALESCE(last_used_at, created_at) < ?`
       )
       .all(opts.maxConfidence, opts.staleBefore) as { id: number }[]

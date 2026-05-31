@@ -51,7 +51,7 @@ function isAgentKind(v: unknown): v is AgentKind {
 function isSide(v: unknown): v is Side {
   return v === 'architect' || v === 'executor'
 }
-const MEMORY_KINDS: MemoryKind[] = ['preference', 'fact', 'project', 'person', 'pattern', 'episodic']
+const MEMORY_KINDS: MemoryKind[] = ['preference', 'fact', 'project', 'person', 'pattern', 'episodic', 'skill']
 function isMemoryKind(v: unknown): v is MemoryKind {
   return typeof v === 'string' && (MEMORY_KINDS as string[]).includes(v)
 }

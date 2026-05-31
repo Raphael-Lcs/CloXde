@@ -439,6 +439,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
                 <option value="person">人物</option>
                 <option value="pattern">习惯</option>
                 <option value="episodic">事件</option>
+                <option value="skill">技能</option>
               </select>
               <input
                 type="text"
@@ -623,6 +624,8 @@ function memoryKindLabel(kind: MemoryKind): string {
       return '习惯'
     case 'episodic':
       return '事件'
+    case 'skill':
+      return '技能'
     default:
       return kind
   }

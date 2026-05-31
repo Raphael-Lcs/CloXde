@@ -531,7 +531,7 @@ function safeJson<T>(s: string): T | null {
   }
 }
 
-const MEMORY_KINDS = ['preference', 'fact', 'project', 'person', 'pattern', 'episodic']
+const MEMORY_KINDS = ['preference', 'fact', 'project', 'person', 'pattern', 'episodic', 'skill']
 function isMemoryKind(s: unknown): s is import('@shared/types').MemoryKind {
   return typeof s === 'string' && MEMORY_KINDS.includes(s)
 }

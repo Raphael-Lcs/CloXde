@@ -187,6 +187,7 @@ export type MemoryKind =
   | 'person' // people in the user's orbit
   | 'pattern' // recurring behaviours / routines worth anticipating
   | 'episodic' // notable one-off events, for later recall
+  | 'skill' // procedural know-how: a reusable way to accomplish a task
 
 export interface AssistantMemory {
   /** External (string) id used across IPC, matching the app's uuid style. */
