@@ -38,6 +38,7 @@ import { assistantMessageRepo } from '../storage/db'
 import { nextCronFire } from '../conversation/cron'
 import { getMemoryService } from './memory'
 import * as actions from './actions'
+import { extractAll, stripDirectives } from './directives'
 import { ASSISTANT_SYSTEM_PROMPT } from './prompts'
 
 /** A reason the brain is being woken. Free-form `text` is what the brain reads;
@@ -113,28 +114,6 @@ const readWriteFs = {
     await writeFile(params.path, params.content, 'utf-8')
     return {}
   }
-}
-
-/** Collect all `<<TAG>> body <</TAG>>` blocks for a tag (closing optional, body
- *  runs to the next tag or end — same lenient convention as the team parser). */
-function extractAll(text: string, tag: string): string[] {
-  const re = new RegExp(`<<${tag}>>([\\s\\S]*?)(?:<<\\/${tag}>>|(?=<<\\/?[A-Za-z])|$)`, 'gi')
-  const out: string[] = []
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
-    const body = (m[1] ?? '').trim()
-    if (body) out.push(body)
-  }
-  return out
-}
-
-/** Remove all directive tag blocks (DISPATCH/CONTINUE/REMEMBER/FORGET/REPORT)
- *  from the brain's output, leaving just the natural-language reply. */
-function stripDirectives(text: string): string {
-  return text
-    .replace(/<<(DISPATCH|CONTINUE|REMEMBER|FORGET|UPDATE|SCHEDULE|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
 }
 
 export class AssistantBrain {
