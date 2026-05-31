@@ -693,7 +693,16 @@ export function registerIpcHandlers(): void {
         }
         return ok(turn)
       } catch (e) {
-        return err(`助理处理失败：${(e as Error).message}`)
+        const msg = (e as Error).message
+        // Persist the failure too. The user row was already written up front, so
+        // without this a failed turn leaves a dangling question across a restart
+        // (the renderer shows the error live, but it's not in the saved thread).
+        try {
+          assistantMessageRepo.insert({ role: 'system', text: `出错：${msg}` })
+        } catch (pe) {
+          console.error('[ipc] persist assistant error msg failed:', (pe as Error).message)
+        }
+        return err(`助理处理失败：${msg}`)
       }
     }
   )
