@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, webContents } from 'electron'
 import { basename } from 'node:path'
 import { existsSync, statSync } from 'node:fs'
+import { readFile, writeFile } from 'node:fs/promises'
 import type {
   AgentKind,
   AgentProfile,
@@ -37,6 +38,7 @@ import {
 } from './server/http-server'
 import { listTokens, revokeAll, revokeToken, rotatePin } from './server/auth'
 import { presence, type ActivityKind } from './server/presence'
+import { getSoulPath, ensureCloxdeDir } from './paths'
 
 function ok<T>(data: T): IpcResult<T> {
   return { ok: true, data }
@@ -846,6 +848,32 @@ export function registerIpcHandlers(): void {
     (): IpcResult<number> => {
       try {
         return ok(assistantMessageRepo.countUnreadReports())
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  // Editable persona (SOUL.md). The brain reads it fresh each turn; the UI lets
+  // the user shape its tone/character. A missing file reads as '' (no persona).
+  ipcMain.handle(
+    IPC.AssistantGetSoul,
+    async (): Promise<IpcResult<string>> => {
+      try {
+        return ok(await readFile(getSoulPath(), 'utf-8'))
+      } catch {
+        return ok('')
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.AssistantSetSoul,
+    async (_e, content: string): Promise<IpcResult<true>> => {
+      try {
+        ensureCloxdeDir()
+        await writeFile(getSoulPath(), String(content ?? ''), 'utf-8')
+        return ok(true)
       } catch (e) {
         return err((e as Error).message)
       }

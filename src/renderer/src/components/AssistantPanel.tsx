@@ -89,6 +89,12 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
   // reliably surface a dialog in this Electron renderer (it silently returns
   // false), which made the 忘记 button look dead — so we confirm in-UI instead.
   const [confirmForget, setConfirmForget] = useState<string | null>(null)
+  // Persona drawer (SOUL.md): the user-editable character/tone/boundaries the
+  // brain reads each turn. Background facility, opened on demand via /persona.
+  const [soulOpen, setSoulOpen] = useState(false)
+  const [soulText, setSoulText] = useState('')
+  const [soulLoading, setSoulLoading] = useState(false)
+  const [soulSaving, setSoulSaving] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const attachIdRef = useRef(0)
 
@@ -208,6 +214,36 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
     void loadMemories()
   }, [loadMemories])
 
+  // Open the persona editor on demand (via /persona). Loads the current SOUL.md
+  // so edits round-trip; like memory, it's not a permanent header button.
+  const openPersonaDrawer = useCallback(async () => {
+    setSoulOpen(true)
+    if (!window.api.assistant?.getSoul) return
+    setSoulLoading(true)
+    try {
+      const res = await window.api.assistant.getSoul()
+      if (res.ok) setSoulText(res.data)
+    } finally {
+      setSoulLoading(false)
+    }
+  }, [])
+
+  const savePersona = useCallback(async () => {
+    if (!window.api.assistant?.setSoul) return
+    setSoulSaving(true)
+    try {
+      const res = await window.api.assistant.setSoul(soulText)
+      if (res.ok) {
+        setSoulOpen(false)
+        append('system', '已更新助理人格，下一轮起生效。')
+      } else {
+        window.alert(`保存失败：${res.error}`)
+      }
+    } finally {
+      setSoulSaving(false)
+    }
+  }, [soulText, append])
+
   const pinMemory = useCallback(
     async (m: AssistantMemory) => {
       if (!window.api.assistant?.pinMemory) return
@@ -291,6 +327,14 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
       return
     }
 
+    // /persona — edit the assistant's character/tone/boundaries (SOUL.md). Like
+    // /memory, a deliberate command rather than always-visible chrome.
+    if (text === '/persona' || text === '/soul') {
+      setDraft('')
+      void openPersonaDrawer()
+      return
+    }
+
     // /new — explicit session reset. The brain keeps one session across mode
     // toggles; this is the only way to start over.
     if (text === '/new') {
@@ -370,7 +414,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
     } finally {
       setSending(false)
     }
-  }, [draft, attachments, sending, append, openMemoryDrawer])
+  }, [draft, attachments, sending, append, openMemoryDrawer, openPersonaDrawer])
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -512,12 +556,44 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
           </div>
         </div>
       )}
+      {soulOpen && (
+        <div className="assistant-memory-drawer">
+          <div className="assistant-memory-drawer-head">
+            <strong>助理人格</strong>
+            <span className="assistant-memory-count">
+              {soulLoading ? '加载中…' : '性格 · 语气 · 边界'}
+            </span>
+            <button
+              className="primary"
+              onClick={() => void savePersona()}
+              disabled={soulSaving || soulLoading}
+              title="保存，下一轮起生效"
+            >
+              {soulSaving ? '保存中…' : '保存'}
+            </button>
+            <button onClick={() => setSoulOpen(false)} title="收起">
+              关闭
+            </button>
+          </div>
+          <div className="assistant-persona-body">
+            <textarea
+              className="assistant-persona-text"
+              value={soulText}
+              disabled={soulLoading}
+              placeholder={
+                '为助理设定性格、语气和边界，例如：\n- 说话简短直接，别绕弯子\n- 遇到拿不准的事先问我再动手\n- 用轻松的口吻，但别用表情符号\n\n留空则使用默认风格。'
+              }
+              onChange={(e) => setSoulText(e.target.value)}
+            />
+          </div>
+        </div>
+      )}
       <div className="assistant-stream" ref={scrollRef}>
         {entries.length === 0 ? (
           <div className="assistant-empty">
             和助理说点什么吧。它不会自己写代码——它会判断、决定，然后把活派给团队。
             <br />
-            输入 /new 可开启全新会话；它会自己记住要紧的事，需要时输入 /memory 看一眼。
+            输入 /new 可开启全新会话；它会自己记住要紧的事，需要时输入 /memory 看一眼，/persona 调它的性格。
           </div>
         ) : (
           entries.map((e) => {
@@ -579,7 +655,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
         <div className="assistant-composer-row">
           <textarea
             value={draft}
-            placeholder="对助理说…（Enter 发送，Shift+Enter 换行 · 可粘贴/拖入图片 · /new 新会话 · /memory 看记忆）"
+            placeholder="对助理说…（Enter 发送，Shift+Enter 换行 · 可粘贴/拖入图片 · /new 新会话 · /memory 看记忆 · /persona 调性格）"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onKeyDown}
             onPaste={onPaste}

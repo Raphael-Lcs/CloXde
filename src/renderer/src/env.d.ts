@@ -122,6 +122,8 @@ interface CloXdeApi {
     listMessages: (limit?: number) => Promise<IpcResult<AssistantMessageRecord[]>>
     markReportsRead: () => Promise<IpcResult<true>>
     countUnreadReports: () => Promise<IpcResult<number>>
+    getSoul: () => Promise<IpcResult<string>>
+    setSoul: (content: string) => Promise<IpcResult<true>>
     onReport: (cb: (report: AssistantReport) => void) => Unsubscribe
     onActivity: (cb: (activity: AssistantActivity) => void) => Unsubscribe
   }

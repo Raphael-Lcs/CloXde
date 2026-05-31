@@ -33,7 +33,7 @@ import type {
   MemoryHit
 } from '@shared/types'
 import { AcpRuntime } from '../acp/runtime'
-import { getWorkspaceDir, ensureWorkspaceDir } from '../paths'
+import { getWorkspaceDir, ensureWorkspaceDir, getSoulPath } from '../paths'
 import { assistantMessageRepo } from '../storage/db'
 import { nextCronFire } from '../conversation/cron'
 import { getMemoryService } from './memory'
@@ -343,6 +343,11 @@ export class AssistantBrain {
       }
     }
 
+    // The user-editable persona (SOUL.md). Read every turn so an edit takes effect
+    // on the next turn — same liveness as [关于用户]. Empty when the file is
+    // absent, in which case the brain just runs on its base prompt.
+    const soul = await this.loadSoul()
+
     const rt = this.ensureRuntime()
 
     // First turn of the process: pull the recent thread out of the DB so the
@@ -388,7 +393,8 @@ export class AssistantBrain {
         compactSummary,
         profile,
         history,
-        refById
+        refById,
+        soul
       )
 
       // Build content blocks: text prompt + any image/file attachments the user
@@ -461,7 +467,8 @@ export class AssistantBrain {
     compactSummary?: string,
     profile: AssistantMemory[] = [],
     history: AssistantMessageRecord[] = [],
-    refById: Map<string, string> = new Map()
+    refById: Map<string, string> = new Map(),
+    soul = ''
   ): string {
     const parts: string[] = []
     const tag = (id: string): string => {
@@ -470,6 +477,14 @@ export class AssistantBrain {
     }
     if (includeSystem) {
       parts.push(ASSISTANT_SYSTEM_PROMPT)
+    }
+    // The user-authored persona, right after identity. Subordinate to the system
+    // prompt (it shapes tone/character/boundaries, it doesn't override the
+    // delegator role). Injected every turn so edits are live.
+    if (soul) {
+      parts.push(
+        `[人格]（用户为你设定的性格、语气与边界；在不违背上面职责的前提下，照此与用户相处）\n${soul}`
+      )
     }
     if (compactSummary) {
       parts.push(
@@ -498,6 +513,17 @@ export class AssistantBrain {
     }
     parts.push(`[信号] (${signal.kind})\n${signal.text}`)
     return parts.join('\n\n')
+  }
+
+  /** Read the user-editable persona file (~/.cloxde/SOUL.md). Best-effort: a
+   *  missing or unreadable file yields '' so the brain just runs on its base
+   *  prompt. Read fresh each turn so edits apply on the next turn. */
+  private async loadSoul(): Promise<string> {
+    try {
+      return (await readFile(getSoulPath(), 'utf-8')).trim()
+    } catch {
+      return ''
+    }
   }
 
   private async executeDirectives(

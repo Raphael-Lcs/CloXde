@@ -193,6 +193,9 @@ const api = {
       ipcRenderer.invoke(IPC.AssistantMarkReportsRead),
     countUnreadReports: (): Promise<IpcResult<number>> =>
       ipcRenderer.invoke(IPC.AssistantCountUnreadReports),
+    getSoul: (): Promise<IpcResult<string>> => ipcRenderer.invoke(IPC.AssistantGetSoul),
+    setSoul: (content: string): Promise<IpcResult<true>> =>
+      ipcRenderer.invoke(IPC.AssistantSetSoul, content),
     onReport: (cb: (report: AssistantReport) => void): Unsubscribe =>
       on<AssistantReport>(IPC.AssistantReportEvent, cb),
     onActivity: (cb: (activity: AssistantActivity) => void): Unsubscribe =>

@@ -2417,6 +2417,27 @@ body.col-resizing * { cursor: col-resize !important; }
   background: var(--bg-elev);
   cursor: pointer;
 }
+/* Persona editor (SOUL.md) — a single free-text area inside a memory-style drawer. */
+.assistant-persona-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  padding: 10px 16px 14px;
+}
+.assistant-persona-text {
+  flex: 1;
+  resize: none;
+  width: 100%;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+.assistant-persona-text:disabled { opacity: 0.6; }
 /* Manual add-memory form (inside the drawer). */
 .assistant-memory-add {
   display: flex;

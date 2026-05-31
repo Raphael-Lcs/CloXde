@@ -52,6 +52,8 @@ export const IPC = {
   AssistantListMessages: 'assistant:list-messages', // hydrate the panel's persisted chat thread
   AssistantMarkReportsRead: 'assistant:mark-reports-read', // clear the unread-report badge
   AssistantCountUnreadReports: 'assistant:count-unread-reports', // titlebar badge count
+  AssistantGetSoul: 'assistant:get-soul', // read the editable persona (SOUL.md)
+  AssistantSetSoul: 'assistant:set-soul', // write the editable persona (SOUL.md)
   AssistantReportEvent: 'assistant:report', // main → renderer, proactive AssistantReport
   AssistantActivityEvent: 'assistant:activity', // main → renderer, live turn progress (AssistantActivity)
 

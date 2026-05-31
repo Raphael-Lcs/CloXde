@@ -67,6 +67,12 @@ export function getDbPath(): string {
 export function getWorkspaceDir(): string {
   return compute().workspaceDir
 }
+/** The assistant's editable persona file (Hermes-style SOUL.md). Lives beside
+ *  config.json in ~/.cloxde — it's a small, user-authored config, NOT part of the
+ *  relocatable workspace that holds project codebases. */
+export function getSoulPath(): string {
+  return join(compute().cloxdeDir, 'SOUL.md')
+}
 
 export function ensureCloxdeDir(): void {
   mkdirSync(compute().cloxdeDir, { recursive: true })
