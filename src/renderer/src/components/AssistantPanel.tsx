@@ -85,6 +85,10 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
   const [addOpen, setAddOpen] = useState(false)
   const [addKind, setAddKind] = useState<MemoryKind>('fact')
   const [addText, setAddText] = useState('')
+  // Inline two-step delete confirm, keyed by memory id. window.confirm() doesn't
+  // reliably surface a dialog in this Electron renderer (it silently returns
+  // false), which made the 忘记 button look dead — so we confirm in-UI instead.
+  const [confirmForget, setConfirmForget] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const attachIdRef = useRef(0)
 
@@ -195,12 +199,13 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
     }
   }, [])
 
-  const toggleMemoryDrawer = useCallback(() => {
-    setMemoryOpen((open) => {
-      const next = !open
-      if (next) void loadMemories()
-      return next
-    })
+  // Open the memory drawer on demand (via the /memory command). Memory is a
+  // background facility — the assistant just remembers, like a person would, so
+  // it's not surfaced as a permanent header button; you open it deliberately
+  // only when you want to peek.
+  const openMemoryDrawer = useCallback(() => {
+    setMemoryOpen(true)
+    void loadMemories()
   }, [loadMemories])
 
   const pinMemory = useCallback(
@@ -216,11 +221,14 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
     []
   )
 
+  // Two-step forget: first click arms the confirm, second click deletes. No
+  // window.confirm — it doesn't render reliably here, which is what made the
+  // button feel broken.
   const forgetMemory = useCallback(async (m: AssistantMemory) => {
     if (!window.api.assistant?.forgetMemory) return
-    if (!window.confirm(`确定让助理忘记这条记忆吗？\n\n${m.content}`)) return
     const res = await window.api.assistant.forgetMemory(m.id)
     if (res.ok) setMemories((curr) => curr.filter((x) => x.id !== m.id))
+    setConfirmForget(null)
   }, [])
 
   const submitAddMemory = useCallback(async () => {
@@ -271,6 +279,15 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
     if (sending) return
     if (!window.api.assistant) {
       append('system', '助理接口尚未就绪——请完全退出并重启应用。')
+      return
+    }
+
+    // /memory — peek at what the assistant remembers. Deliberately a command,
+    // not a permanent button: memory lives in the background, you only open it
+    // when you actually want to look.
+    if (text === '/memory') {
+      setDraft('')
+      openMemoryDrawer()
       return
     }
 
@@ -341,7 +358,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
     } finally {
       setSending(false)
     }
-  }, [draft, attachments, sending, append])
+  }, [draft, attachments, sending, append, openMemoryDrawer])
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -392,13 +409,6 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
         <span className="assistant-sub">
           你的私人助理 · 会判断该做什么、创建项目并指挥团队，再向你回报
         </span>
-        <button
-          className="assistant-memory-toggle"
-          onClick={toggleMemoryDrawer}
-          title="查看助理记住的东西"
-        >
-          {memoryOpen ? '关闭记忆' : '记忆'}
-        </button>
       </div>
       {memoryOpen && (
         <div className="assistant-memory-drawer">
@@ -412,6 +422,9 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
             </button>
             <button onClick={() => void loadMemories()} title="刷新" disabled={memoryLoading}>
               刷新
+            </button>
+            <button onClick={() => setMemoryOpen(false)} title="收起记忆">
+              关闭
             </button>
           </div>
           {addOpen && (
@@ -459,9 +472,24 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
                       >
                         {m.pinned ? '📌 已固定' : '固定'}
                       </button>
-                      <button onClick={() => void forgetMemory(m)} title="永久删除这条记忆">
-                        忘记
-                      </button>
+                      {confirmForget === m.id ? (
+                        <>
+                          <button
+                            className="danger"
+                            onClick={() => void forgetMemory(m)}
+                            title="确认永久删除"
+                          >
+                            确认忘记
+                          </button>
+                          <button onClick={() => setConfirmForget(null)} title="取消">
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button onClick={() => setConfirmForget(m.id)} title="永久删除这条记忆">
+                          忘记
+                        </button>
+                      )}
                     </span>
                   </div>
                   <div className="assistant-memory-content">{m.content}</div>
@@ -476,7 +504,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
           <div className="assistant-empty">
             和助理说点什么吧。它不会自己写代码——它会判断、决定，然后把活派给团队。
             <br />
-            输入 /new 可开启全新会话。
+            输入 /new 可开启全新会话；它会自己记住要紧的事，需要时输入 /memory 看一眼。
           </div>
         ) : (
           entries.map((e) => {
@@ -538,7 +566,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
         <div className="assistant-composer-row">
           <textarea
             value={draft}
-            placeholder="对助理说…（Enter 发送，Shift+Enter 换行 · 可粘贴/拖入图片 · /new 新会话）"
+            placeholder="对助理说…（Enter 发送，Shift+Enter 换行 · 可粘贴/拖入图片 · /new 新会话 · /memory 看记忆）"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
