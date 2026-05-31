@@ -28,6 +28,7 @@ import type {
 import type { AgentProfile, AssistantTurn, MemoryHit } from '@shared/types'
 import { AcpRuntime } from '../acp/runtime'
 import { getWorkspaceDir, ensureWorkspaceDir } from '../paths'
+import { assistantMessageRepo } from '../storage/db'
 import { getMemoryService } from './memory'
 import * as actions from './actions'
 import { ASSISTANT_SYSTEM_PROMPT } from './prompts'
@@ -168,6 +169,49 @@ export class AssistantBrain {
    *  distilling an unchanged conversation, and reflection turns can't
    *  self-perpetuate. */
   private turnsTotal = 0
+  /** Whether we've tried to reload the recent thread from the persisted DB into
+   *  the transcript. Done once, lazily, on the first turn of a process: the
+   *  brain singleton is fresh on restart (blank transcript, no ACP session
+   *  restore), so without this it has amnesia even though the panel shows the
+   *  full history. Seeding the transcript carries the recent dialog into the
+   *  first prompt so the brain's context matches what the user sees. */
+  private hydrated = false
+
+  /** Rebuild the recent user↔assistant thread from the persisted DB so a process
+   *  restart doesn't reset the brain's working memory. Idempotent — runs once.
+   *  Returns a transcript summary to seed the first prompt with (empty when
+   *  there's nothing to carry, or already hydrated). */
+  private hydrateTranscript(): string {
+    if (this.hydrated) return ''
+    this.hydrated = true
+    try {
+      const recs = assistantMessageRepo.list(60) // oldest → newest
+      const pairs: { user: string; assistant: string }[] = []
+      let pendingUser: string | null = null
+      for (const r of recs) {
+        if (r.role === 'user') {
+          // Two user rows in a row (no reply between) — keep the latest.
+          if (pendingUser !== null) pairs.push({ user: pendingUser, assistant: '' })
+          pendingUser = r.text
+        } else if (r.role === 'assistant' || r.role === 'report') {
+          if (pendingUser !== null) {
+            pairs.push({ user: pendingUser, assistant: r.text })
+            pendingUser = null
+          }
+        }
+        // 'system' rows (dispatch/continue notes) aren't part of the dialog.
+      }
+      if (pendingUser !== null) pairs.push({ user: pendingUser, assistant: '' })
+      this.transcript = pairs.slice(-AssistantBrain.TRANSCRIPT_KEEP).map((p) => ({
+        user: clampLine(p.user, AssistantBrain.TRANSCRIPT_CHARS),
+        assistant: clampLine(p.assistant, AssistantBrain.TRANSCRIPT_CHARS)
+      }))
+      return this.transcript.length > 0 ? this.buildTranscriptSummary() : ''
+    } catch (e) {
+      console.error('[assistant-brain] hydrate transcript failed:', (e as Error).message)
+      return ''
+    }
+  }
 
   /** True while at least one think() turn is queued or running. */
   isBusy(): boolean {
@@ -254,6 +298,12 @@ export class AssistantBrain {
 
     const rt = this.ensureRuntime()
 
+    // First turn of the process: pull the recent thread out of the DB so the
+    // brain resumes with the context the panel already shows (it otherwise
+    // starts blank — no ACP session is restored across a restart). The seed is
+    // injected as a [对话摘要] on the first prompt, same channel compaction uses.
+    const restartSeed = this.hydrateTranscript()
+
     // Context compaction: once the session has run enough turns, drop it and
     // reseed a fresh one carrying only the system prompt + a short transcript
     // summary. Must happen BEFORE start() so restartFresh's forceFresh is
@@ -266,6 +316,9 @@ export class AssistantBrain {
       this.systemPromptSent = false
       this.turnsSinceFresh = 0
     }
+    // No compaction this turn, but we just restarted the process and have prior
+    // dialog to carry — seed the first prompt with it.
+    if (!compactSummary && restartSeed) compactSummary = restartSeed
 
     this.buffer = ''
     actions.emitActivity({ phase: 'start' })

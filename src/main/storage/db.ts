@@ -1260,5 +1260,23 @@ export const assistantMessageRepo = {
   /** Wipe the whole thread — used by /new (session reset). */
   clear(): void {
     getDb().prepare('DELETE FROM assistant_messages').run()
+  },
+  /** Cap the thread to its most recent `keep` rows. The assistant thread is a
+   *  single ever-growing log (unlike per-conversation team messages), so without
+   *  a cap it grows unbounded. Returns how many rows were pruned. */
+  trimToLast(keep: number): number {
+    const db = getDb()
+    const total = (db.prepare('SELECT COUNT(*) AS n FROM assistant_messages').get() as {
+      n: number
+    }).n
+    if (total <= keep) return 0
+    const info = db
+      .prepare(
+        `DELETE FROM assistant_messages WHERE id NOT IN (
+           SELECT id FROM assistant_messages ORDER BY ts DESC LIMIT ?
+         )`
+      )
+      .run(keep)
+    return info.changes
   }
 }

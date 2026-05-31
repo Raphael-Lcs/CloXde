@@ -14,7 +14,7 @@
 // than the last review simply skips thinking.
 
 import { join } from 'node:path'
-import { projectRepo, conversationRepo, messageRepo } from '../storage/db'
+import { projectRepo, conversationRepo, messageRepo, assistantMessageRepo } from '../storage/db'
 import { conversationEngine, type InstabilityEvent } from '../conversation/engine'
 import { getWorkspaceDir } from '../paths'
 import { getAssistantBrain, type Signal } from './brain'
@@ -31,6 +31,11 @@ const MESSAGES_PER_CONV = 6
  *  this it grows unbounded — stale, low-confidence, unpinned memories never
  *  leave. Daily is plenty: pruning is cheap and the staleness window is 30d. */
 const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
+/** Retention cap for the assistant's persisted chat thread. It's a single
+ *  ever-growing log (not bounded by conversation lifecycle), so the daily prune
+ *  also trims it back to the most recent N rows. Generous — the brain only
+ *  hydrates the last ~60, and the panel lists 500. */
+const MESSAGE_RETENTION = 2000
 /** How often the self-distillation (reflection) pass runs. It wakes the brain to
  *  mine its own recent conversation for durable facts/preferences and store them
  *  via <<REMEMBER>>. It costs a full model turn, so it is deliberately rare AND
@@ -135,6 +140,12 @@ function maybePrune(): void {
     if (dropped > 0) console.log(`[assistant-review] pruned ${dropped} stale memories`)
   } catch (e) {
     console.error('[assistant-review] prune failed:', (e as Error).message)
+  }
+  try {
+    const trimmed = assistantMessageRepo.trimToLast(MESSAGE_RETENTION)
+    if (trimmed > 0) console.log(`[assistant-review] trimmed ${trimmed} old assistant messages`)
+  } catch (e) {
+    console.error('[assistant-review] message trim failed:', (e as Error).message)
   }
 }
 
