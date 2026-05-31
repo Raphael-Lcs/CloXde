@@ -13,7 +13,7 @@
 // Run with:  npx tsx scripts/test-scheduler.ts
 // Exit code = number of failures.
 
-import { computeNextFire, nextCronFire, parseCron } from '../src/main/conversation/scheduler'
+import { computeNextFire, nextCronFire, parseCron } from '../src/main/conversation/cron'
 
 let passed = 0
 let failed = 0
