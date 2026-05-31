@@ -56,11 +56,15 @@ async function fireDue(now: number): Promise<void> {
       // A cron with no future match (or a degenerate interval) self-disables.
       ...(next === null ? { enabled: false } : {})
     })
-    // Skip orphaned schedules whose conversation was deleted.
-    if (!conversationRepo.get(s.conversationId)) {
+    const conv = conversationRepo.get(s.conversationId)
+    // Deletion is permanent → drop the orphaned schedule. Archiving is
+    // reversible → keep the schedule but skip this fire; it resumes (on the
+    // recomputed nextFireAt) if the conversation is ever unarchived.
+    if (!conv) {
       scheduleRepo.delete(s.id)
       continue
     }
+    if (conv.archivedAt !== undefined) continue
     try {
       await inject(s.conversationId, s.prompt)
     } catch (e) {

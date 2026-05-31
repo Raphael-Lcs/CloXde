@@ -2323,6 +2323,7 @@ body.col-resizing * { cursor: col-resize !important; }
   font-family: 'Cascadia Mono', 'JetBrains Mono', monospace;
 }
 .schedule-next { margin-left: auto; }
+.schedule-last { margin-top: 0; color: var(--fg-muted); }
 .schedule-prompt {
   margin-left: 16px;
   font-size: 11px; color: var(--fg-muted);

@@ -43,6 +43,13 @@ export function SchedulesPanel({ conversationId }: SchedulesPanelProps): JSX.Ele
     void refresh()
   }, [conversationId, refresh])
 
+  // Fires happen in the main process with no IPC push, so poll while mounted to
+  // keep "下次/上次" fresh. 30s matches the scheduler tick.
+  useEffect(() => {
+    const id = setInterval(() => void refresh(), 30_000)
+    return () => clearInterval(id)
+  }, [refresh])
+
   const handleToggle = useCallback(
     async (s: Schedule): Promise<void> => {
       await window.api.schedules.update(s.id, { enabled: !s.enabled })
@@ -177,6 +184,11 @@ function ScheduleRow({
           {schedule.enabled ? `下次 ${formatTs(schedule.nextFireAt)}` : '已暂停'}
         </span>
       </div>
+      {schedule.lastFiredAt && (
+        <div className="schedule-meta schedule-last">
+          <span>上次 {formatTs(schedule.lastFiredAt)}</span>
+        </div>
+      )}
       <div className="schedule-prompt" title={schedule.prompt}>
         {schedule.prompt}
       </div>

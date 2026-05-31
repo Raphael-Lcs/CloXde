@@ -392,8 +392,18 @@ export class ConversationEngine extends EventEmitter {
     conversationId: string,
     text: string,
     target?: Side,
-    attachments?: { data: string; mimeType: string }[]
+    attachments?: { data: string; mimeType: string }[],
+    opts?: {
+      /** When false, do NOT interrupt the target side's in-flight turn —
+       *  queue this message behind it instead. Used by timed automation so a
+       *  scheduled prompt firing mid-turn doesn't cut off the live PM/team
+       *  conversation; it lands at the tail of the side's promise chain and
+       *  runs once the current cascade settles. Defaults to true (real user
+       *  input preempts, matching the "I typed this, act now" expectation). */
+      preempt?: boolean
+    }
   ): Promise<void> {
+    const preempt = opts?.preempt !== false
     const slot = await this.startIfNeeded(conversationId)
     const initialSide: Role = slot.pm
       ? 'pm'
@@ -402,7 +412,9 @@ export class ConversationEngine extends EventEmitter {
     if (!sr) return
 
     // Preempt only the side we're sending to — team work is independent.
-    if (sr.streamingMessageId) {
+    // Scheduled injections (preempt=false) skip this so they queue behind any
+    // in-flight turn rather than cancelling it.
+    if (preempt && sr.streamingMessageId) {
       try {
         await sr.runtime.cancel()
       } catch {
@@ -420,7 +432,9 @@ export class ConversationEngine extends EventEmitter {
     // Drop any queued follow-ups on this side (e.g. a stale team-report that
     // hasn't reached PM yet) so the user message takes precedence. The team
     // can still emit fresh reports once their current cascade completes.
-    sr.inFlight = Promise.resolve()
+    // A queued scheduled injection (preempt=false) must NOT do this — clearing
+    // inFlight would let it jump ahead of the very turn it's meant to follow.
+    if (preempt) sr.inFlight = Promise.resolve()
 
     // User intervention breaks any stall — the next agent turn gets a
     // fresh budget of nudges before we idle on it again.

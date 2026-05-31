@@ -211,9 +211,13 @@ app.whenReady().then(() => {
   registerIpcHandlers()
 
   // Timed automation: the scheduler injects canned prompts into existing
-  // conversations on a cadence (same path as a user message → PM).
+  // conversations on a cadence (same path as a user message → PM). preempt:false
+  // so a scheduled fire queues behind any in-flight turn instead of cutting off
+  // a live conversation.
   startScheduler((conversationId, text) =>
-    conversationEngine.sendUserMessage(conversationId, text)
+    conversationEngine.sendUserMessage(conversationId, text, undefined, undefined, {
+      preempt: false
+    })
   )
 
   // Start the LAN HTTP+WS companion server so the Android tablet App can
