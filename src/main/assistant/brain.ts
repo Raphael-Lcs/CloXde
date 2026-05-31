@@ -23,7 +23,7 @@ import type {
 } from '@agentclientprotocol/sdk'
 import type { AgentProfile, AssistantTurn, MemoryHit } from '@shared/types'
 import { AcpRuntime } from '../acp/runtime'
-import { getWorkspaceDir } from '../paths'
+import { getWorkspaceDir, ensureWorkspaceDir } from '../paths'
 import { getMemoryService } from './memory'
 import * as actions from './actions'
 import { ASSISTANT_SYSTEM_PROMPT } from './prompts'
@@ -39,6 +39,8 @@ export interface Signal {
     | 'cron'
     | 'reflection'
   text: string
+  /** Optional image/file attachments (base64 data + mimeType). */
+  attachments?: { data: string; mimeType: string }[]
   /** Optional provenance for memory/report attribution. */
   projectId?: string
   conversationId?: string
@@ -118,6 +120,12 @@ export class AssistantBrain {
 
   private ensureRuntime(): AcpRuntime {
     if (this.runtime) return this.runtime
+    // The brain spawns its adapter with cwd = the workspace dir. On Windows a
+    // missing cwd makes spawn() fail with a misleading ENOENT (reported against
+    // the command, surfacing to the UI as "write EPIPE"). The workspace is
+    // otherwise only created lazily on first project dispatch, so create it
+    // here before it's ever used as a spawn cwd.
+    ensureWorkspaceDir()
     const rt = new AcpRuntime({
       profile: brainProfile(),
       cwd: getWorkspaceDir(),
@@ -149,21 +157,36 @@ export class AssistantBrain {
   private async thinkOnce(signal: Signal): Promise<ThinkResult> {
     const memory = getMemoryService()
     const hits = await memory.recall(signal.text, { k: 6 })
-    const prompt = this.buildPrompt(signal, hits)
+    // Decide up front whether THIS prompt carries the system prompt, but don't
+    // mark it delivered until prompt() actually succeeds — otherwise a failed
+    // first turn (e.g. adapter spawn error) would burn the flag and every later
+    // turn would run with no delegator identity, reverting the brain to a plain
+    // coding assistant.
+    const includeSystem = !this.systemPromptSent
+    const promptText = this.buildPrompt(signal, hits, includeSystem)
+
+    // Build content blocks: text prompt + any image/file attachments the user
+    // sent. The adapter (Claude Code) supports multimodal input.
+    const blocks: ContentBlock[] = [{ type: 'text', text: promptText }]
+    if (signal.attachments) {
+      for (const att of signal.attachments) {
+        blocks.push({ type: 'image', data: att.data, mimeType: att.mimeType })
+      }
+    }
 
     const rt = this.ensureRuntime()
     this.buffer = ''
-    await rt.prompt([{ type: 'text', text: prompt } as ContentBlock])
+    await rt.prompt(blocks)
+    if (includeSystem) this.systemPromptSent = true
     const raw = this.buffer.trim()
 
     return this.executeDirectives(raw, signal)
   }
 
-  private buildPrompt(signal: Signal, hits: MemoryHit[]): string {
+  private buildPrompt(signal: Signal, hits: MemoryHit[], includeSystem: boolean): string {
     const parts: string[] = []
-    if (!this.systemPromptSent) {
+    if (includeSystem) {
       parts.push(ASSISTANT_SYSTEM_PROMPT)
-      this.systemPromptSent = true
     }
     if (hits.length > 0) {
       const lines = hits.map((h) => `- (${h.kind}) ${h.content}`).join('\n')

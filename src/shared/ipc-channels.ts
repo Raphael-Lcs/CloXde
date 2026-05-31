@@ -43,6 +43,7 @@ export const IPC = {
 
   // Assistant (the user-scoped layer above the team)
   AssistantSendMessage: 'assistant:send-message', // user → brain, returns AssistantTurn
+  AssistantResetSession: 'assistant:reset-session', // /new — dispose the brain's ACP session so the next turn starts fresh
   AssistantListMemories: 'assistant:list-memories',
   AssistantReportEvent: 'assistant:report', // main → renderer, proactive AssistantReport
 

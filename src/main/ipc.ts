@@ -603,16 +603,37 @@ export function registerIpcHandlers(): void {
   // --- Assistant ----------------------------------------------------------
   ipcMain.handle(
     IPC.AssistantSendMessage,
-    async (_e, text: unknown): Promise<IpcResult<AssistantTurn>> => {
+    async (
+      _e,
+      text: unknown,
+      attachments: unknown
+    ): Promise<IpcResult<AssistantTurn>> => {
       if (typeof text !== 'string' || !text.trim()) return err('empty message')
+      const atts = Array.isArray(attachments) ? attachments : []
       try {
         const turn = await getAssistantBrain().think({
           kind: 'user-message',
-          text: text.trim()
+          text: text.trim(),
+          attachments: atts
         })
         return ok(turn)
       } catch (e) {
         return err(`助理处理失败：${(e as Error).message}`)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.AssistantResetSession,
+    async (): Promise<IpcResult<true>> => {
+      // /new — drop the brain's cached ACP session so the next turn respawns a
+      // fresh adapter and re-sends the delegator system prompt. The singleton
+      // brain otherwise keeps one long-lived session across mode toggles.
+      try {
+        await getAssistantBrain().dispose()
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
       }
     }
   )

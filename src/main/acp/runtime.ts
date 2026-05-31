@@ -42,6 +42,35 @@ function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
 
+// child.kill() on Windows terminates ONLY the adapter process — the
+// grandchildren it spawns (sandboxed exec helpers: codex, python, ffmpeg, …)
+// get reparented and orphaned. Across many app launches these accumulate
+// until the machine runs out of desktop/handle resources and Windows can no
+// longer spawn ANY process — at which point the desktop shortcut silently
+// fails (WScript: "insufficient resources") and the app "won't open". So on
+// Windows kill the whole tree by PID via taskkill /T; on other platforms a
+// direct kill is enough.
+function killTree(child: ChildProcess): void {
+  if (child.killed) return
+  if (process.platform === 'win32' && child.pid != null) {
+    try {
+      spawn('taskkill', ['/F', '/T', '/PID', String(child.pid)], {
+        stdio: 'ignore',
+        windowsHide: true
+      })
+      return
+    } catch {
+      // taskkill unavailable/blocked — fall through to a direct kill so we at
+      // least take the adapter itself down.
+    }
+  }
+  try {
+    child.kill()
+  } catch {
+    // already exited
+  }
+}
+
 // Built-in adapter packages we ship. Resolved at spawn time relative to the
 // app's node_modules so packagers can swap them out.
 function defaultAdapterEntry(kind: AgentKind): string {
@@ -261,7 +290,7 @@ export class AcpRuntime extends EventEmitter {
     try {
       await this.withInitTimeout(this.handshake(conn, cwd))
     } catch (err) {
-      if (this.process === child && !child.killed) child.kill()
+      if (this.process === child) killTree(child)
       throw err
     }
   }
@@ -402,7 +431,7 @@ export class AcpRuntime extends EventEmitter {
       // from. Dropping them now lets the old child + its closures be collected.
       old.removeAllListeners()
       old.stderr?.removeAllListeners()
-      if (!old.killed) old.kill()
+      killTree(old)
     }
   }
 
@@ -425,7 +454,7 @@ export class AcpRuntime extends EventEmitter {
       this.sessionId = null
       this.starting = null
       if (this.process && !this.process.killed) {
-        this.process.kill()
+        killTree(this.process)
       }
       this.process = null
       // Unblock any caller still awaiting prompt() — we're tearing down, and

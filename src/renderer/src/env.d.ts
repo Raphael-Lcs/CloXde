@@ -106,7 +106,11 @@ interface CloXdeApi {
     onActivity: (cb: (rec: PresenceActivity) => void) => Unsubscribe
   }
   assistant: {
-    sendMessage: (text: string) => Promise<IpcResult<AssistantTurn>>
+    sendMessage: (
+      text: string,
+      attachments?: { data: string; mimeType: string }[]
+    ) => Promise<IpcResult<AssistantTurn>>
+    resetSession: () => Promise<IpcResult<true>>
     listMemories: (limit?: number) => Promise<IpcResult<AssistantMemory[]>>
     onReport: (cb: (report: AssistantReport) => void) => Unsubscribe
   }

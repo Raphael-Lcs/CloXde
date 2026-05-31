@@ -168,8 +168,13 @@ const api = {
   },
   /** The assistant layer — the user-scoped delegator above the team. */
   assistant: {
-    sendMessage: (text: string): Promise<IpcResult<AssistantTurn>> =>
-      ipcRenderer.invoke(IPC.AssistantSendMessage, text),
+    sendMessage: (
+      text: string,
+      attachments?: { data: string; mimeType: string }[]
+    ): Promise<IpcResult<AssistantTurn>> =>
+      ipcRenderer.invoke(IPC.AssistantSendMessage, text, attachments),
+    resetSession: (): Promise<IpcResult<true>> =>
+      ipcRenderer.invoke(IPC.AssistantResetSession),
     listMemories: (limit?: number): Promise<IpcResult<AssistantMemory[]>> =>
       ipcRenderer.invoke(IPC.AssistantListMemories, limit),
     onReport: (cb: (report: AssistantReport) => void): Unsubscribe =>
