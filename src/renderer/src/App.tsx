@@ -18,6 +18,7 @@ import { NewConversationDialog } from './components/NewConversationDialog'
 import { FileExplorer } from './components/FileExplorer'
 import { TeamPanel } from './components/TeamPanel'
 import { ChangesPanel } from './components/ChangesPanel'
+import { SchedulesPanel } from './components/SchedulesPanel'
 import { Logo } from './components/Logo'
 import { TaskInspector } from './components/TaskInspector'
 import { CommandPalette, type Command } from './components/CommandPalette'
@@ -46,12 +47,15 @@ export function App(): JSX.Element {
   const [newConvProjectId, setNewConvProjectId] = useState<string | null>(null)
   // Right-side drawer: panels can coexist (stacked) and the drawer is
   // drag-resizable.
-  const [rightPanels, setRightPanels] = useState<Array<'files' | 'team' | 'changes'>>([])
+  const [rightPanels, setRightPanels] = useState<
+    Array<'files' | 'team' | 'changes' | 'schedules'>
+  >([])
   const [rightDrawerWidth, setRightDrawerWidth] = useState(340)
   const fileExplorerOpen = rightPanels.includes('files')
   const teamPanelOpen = rightPanels.includes('team')
   const changesPanelOpen = rightPanels.includes('changes')
-  const toggleRightPanel = useCallback((panel: 'files' | 'team' | 'changes') => {
+  const schedulesPanelOpen = rightPanels.includes('schedules')
+  const toggleRightPanel = useCallback((panel: 'files' | 'team' | 'changes' | 'schedules') => {
     setRightPanels((list) =>
       list.includes(panel) ? list.filter((p) => p !== panel) : [...list, panel]
     )
@@ -608,6 +612,16 @@ export function App(): JSX.Element {
             <TeamIcon />
           </button>
         )}
+        {activeProject && conversation && (
+          <button
+            className={`titlebar-icon ${schedulesPanelOpen ? 'active' : ''}`}
+            onClick={() => toggleRightPanel('schedules')}
+            title="定时任务（到点自动给本会话发提示词）"
+            aria-label="定时任务"
+          >
+            <ClockIcon />
+          </button>
+        )}
         {activeProject && (
           <button
             className={`titlebar-icon ${changesPanelOpen ? 'active' : ''}`}
@@ -782,6 +796,11 @@ export function App(): JSX.Element {
                 <ChangesPanel project={activeProject} />
               </div>
             )}
+            {schedulesPanelOpen && conversation && (
+              <div className="right-drawer-section">
+                <SchedulesPanel conversationId={conversation.id} />
+              </div>
+            )}
             {fileExplorerOpen && (
               <div className="right-drawer-section">
                 <FileExplorer project={activeProject} />
@@ -900,6 +919,26 @@ function DiffIcon(): JSX.Element {
       <path d="M6 8.4v7.2" />
       <path d="M18 6h-4.5a2.5 2.5 0 0 0-2.5 2.5V18" />
       <path d="M15.5 3.5 18 6l-2.5 2.5" />
+    </svg>
+  )
+}
+
+function ClockIcon(): JSX.Element {
+  // Simple clock face — timed automation.
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
     </svg>
   )
 }

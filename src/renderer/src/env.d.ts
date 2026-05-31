@@ -13,6 +13,8 @@ import type {
   Message,
   PresenceActivity,
   Project,
+  Schedule,
+  ScheduleTrigger,
   Side
 } from '@shared/types'
 
@@ -99,6 +101,26 @@ interface CloXdeApi {
   }
   presence: {
     onActivity: (cb: (rec: PresenceActivity) => void) => Unsubscribe
+  }
+  schedules: {
+    listByConversation: (conversationId: string) => Promise<IpcResult<Schedule[]>>
+    create: (input: {
+      conversationId: string
+      name?: string
+      trigger: ScheduleTrigger
+      prompt: string
+      enabled?: boolean
+    }) => Promise<IpcResult<Schedule>>
+    update: (
+      id: string,
+      patch: {
+        name?: string
+        trigger?: ScheduleTrigger
+        prompt?: string
+        enabled?: boolean
+      }
+    ) => Promise<IpcResult<true>>
+    delete: (id: string) => Promise<IpcResult<true>>
   }
   deeplink: {
     on: (

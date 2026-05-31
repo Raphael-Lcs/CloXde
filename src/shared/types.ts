@@ -139,6 +139,39 @@ export interface Conversation {
   archivedAt?: number
 }
 
+// --- Schedules (timed automation) ------------------------------------------
+//
+// A schedule fires on a timer and injects a canned message into an existing
+// conversation (as if the user typed it), letting the team run autonomously
+// on a cadence. Two trigger kinds:
+//   • interval — every N milliseconds since the last fire
+//   • cron     — a 5-field cron expression (min hour dom mon dow), local time
+//
+// The scheduler lives in the main process and survives restarts via the DB;
+// nextFireAt is recomputed on load so a schedule that was due while the app
+// was closed fires once on the next tick rather than backfilling every miss.
+
+export type ScheduleTrigger =
+  | { kind: 'interval'; everyMs: number }
+  | { kind: 'cron'; expr: string }
+
+export interface Schedule {
+  id: string
+  conversationId: string
+  /** Human label shown in the UI list. */
+  name: string
+  trigger: ScheduleTrigger
+  /** The message injected into the conversation (sent to PM) when it fires. */
+  prompt: string
+  enabled: boolean
+  /** Epoch ms of the next scheduled fire, recomputed after each fire/load. */
+  nextFireAt: number
+  /** Epoch ms of the last successful fire, null until first run. */
+  lastFiredAt?: number
+  createdAt: number
+  updatedAt: number
+}
+
 // --- Messages --------------------------------------------------------------
 
 export interface PlanEntry {

@@ -13,6 +13,8 @@ import type {
   PlanStep,
   Project,
   Role,
+  Schedule,
+  ScheduleTrigger,
   Side,
   Task,
   TaskStatus
@@ -810,5 +812,127 @@ export const taskRepo = {
     values.push(Date.now())
     values.push(id)
     getDb().prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...values)
+  }
+}
+
+// --- Schedules --------------------------------------------------------------
+
+interface ScheduleRow {
+  id: string
+  conversation_id: string
+  name: string
+  trigger_json: string
+  prompt: string
+  enabled: number
+  next_fire_at: number
+  last_fired_at: number | null
+  created_at: number
+  updated_at: number
+}
+
+function rowToSchedule(row: ScheduleRow): Schedule {
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    name: row.name,
+    trigger: JSON.parse(row.trigger_json) as ScheduleTrigger,
+    prompt: row.prompt,
+    enabled: row.enabled !== 0,
+    nextFireAt: row.next_fire_at,
+    lastFiredAt: row.last_fired_at ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }
+}
+
+const SCHEDULE_COLUMNS = `id, conversation_id, name, trigger_json, prompt,
+  enabled, next_fire_at, last_fired_at, created_at, updated_at`
+
+export const scheduleRepo = {
+  get(id: string): Schedule | null {
+    const row = getDb()
+      .prepare(`SELECT ${SCHEDULE_COLUMNS} FROM schedules WHERE id = ?`)
+      .get(id) as ScheduleRow | undefined
+    return row ? rowToSchedule(row) : null
+  },
+  listByConversation(conversationId: string): Schedule[] {
+    const rows = getDb()
+      .prepare(
+        `SELECT ${SCHEDULE_COLUMNS} FROM schedules
+         WHERE conversation_id = ? ORDER BY created_at ASC`
+      )
+      .all(conversationId) as ScheduleRow[]
+    return rows.map(rowToSchedule)
+  },
+  /** All enabled schedules — the ticker scans these each tick. */
+  listEnabled(): Schedule[] {
+    const rows = getDb()
+      .prepare(
+        `SELECT ${SCHEDULE_COLUMNS} FROM schedules
+         WHERE enabled = 1 ORDER BY next_fire_at ASC`
+      )
+      .all() as ScheduleRow[]
+    return rows.map(rowToSchedule)
+  },
+  create(input: {
+    conversationId: string
+    name: string
+    trigger: ScheduleTrigger
+    prompt: string
+    nextFireAt: number
+    enabled?: boolean
+  }): Schedule {
+    const id = randomUUID()
+    const now = Date.now()
+    getDb()
+      .prepare(
+        `INSERT INTO schedules (id, conversation_id, name, trigger_json, prompt,
+                                enabled, next_fire_at, last_fired_at,
+                                created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`
+      )
+      .run(
+        id,
+        input.conversationId,
+        input.name,
+        JSON.stringify(input.trigger),
+        input.prompt,
+        input.enabled === false ? 0 : 1,
+        input.nextFireAt,
+        now,
+        now
+      )
+    return scheduleRepo.get(id)!
+  },
+  patch(
+    id: string,
+    patch: {
+      name?: string
+      trigger?: ScheduleTrigger
+      prompt?: string
+      enabled?: boolean
+      nextFireAt?: number
+      lastFiredAt?: number
+    }
+  ): void {
+    const fields: string[] = []
+    const values: unknown[] = []
+    if (patch.name !== undefined) { fields.push('name = ?'); values.push(patch.name) }
+    if (patch.trigger !== undefined) {
+      fields.push('trigger_json = ?')
+      values.push(JSON.stringify(patch.trigger))
+    }
+    if (patch.prompt !== undefined) { fields.push('prompt = ?'); values.push(patch.prompt) }
+    if (patch.enabled !== undefined) { fields.push('enabled = ?'); values.push(patch.enabled ? 1 : 0) }
+    if (patch.nextFireAt !== undefined) { fields.push('next_fire_at = ?'); values.push(patch.nextFireAt) }
+    if (patch.lastFiredAt !== undefined) { fields.push('last_fired_at = ?'); values.push(patch.lastFiredAt) }
+    if (fields.length === 0) return
+    fields.push('updated_at = ?')
+    values.push(Date.now())
+    values.push(id)
+    getDb().prepare(`UPDATE schedules SET ${fields.join(', ')} WHERE id = ?`).run(...values)
+  },
+  delete(id: string): void {
+    getDb().prepare('DELETE FROM schedules WHERE id = ?').run(id)
   }
 }

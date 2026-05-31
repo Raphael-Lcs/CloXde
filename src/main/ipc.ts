@@ -11,11 +11,14 @@ import type {
   IpcResult,
   Message,
   Project,
+  Schedule,
+  ScheduleTrigger,
   Side
 } from '@shared/types'
 import { IPC } from '@shared/ipc-channels'
-import { conversationRepo, getDb, messageRepo, profileRepo, projectRepo } from './storage/db'
+import { conversationRepo, getDb, messageRepo, profileRepo, projectRepo, scheduleRepo } from './storage/db'
 import { conversationEngine } from './conversation/engine'
+import { createSchedule, updateSchedule } from './conversation/scheduler'
 import { buildInheritedSummary } from './conversation/summarizer'
 import { ensureWatch, listDir, listProjectFiles, openPath, stopWatch } from './fs/inspector'
 import { gitDiffFile, gitStatus } from './fs/git'
@@ -38,6 +41,24 @@ function isAgentKind(v: unknown): v is AgentKind {
 }
 function isSide(v: unknown): v is Side {
   return v === 'architect' || v === 'executor'
+}
+
+/** Validate an untrusted ScheduleTrigger from the renderer/IPC boundary.
+ *  Returns the narrowed trigger or null. Bounds the interval to ≥1 minute so
+ *  a typo can't spin the team every tick. */
+function parseTrigger(v: unknown): ScheduleTrigger | null {
+  if (!v || typeof v !== 'object') return null
+  const t = v as { kind?: unknown; everyMs?: unknown; expr?: unknown }
+  if (t.kind === 'interval') {
+    if (typeof t.everyMs !== 'number' || !Number.isFinite(t.everyMs)) return null
+    if (t.everyMs < 60_000) return null
+    return { kind: 'interval', everyMs: Math.floor(t.everyMs) }
+  }
+  if (t.kind === 'cron') {
+    if (typeof t.expr !== 'string' || !t.expr.trim()) return null
+    return { kind: 'cron', expr: t.expr.trim() }
+  }
+  return null
 }
 
 function broadcast(channel: string, payload: unknown): void {
@@ -472,6 +493,98 @@ export function registerIpcHandlers(): void {
       if (!isSide(side)) return err('invalid side')
       await conversationEngine.setPrimarySide(id, side)
       recordDesktopPresence(id, 'primary-side')
+      return ok(true)
+    }
+  )
+
+  // --- Schedules (timed automation) --------------------------------------
+  ipcMain.handle(
+    IPC.SchedulesListByConversation,
+    async (_e, conversationId: unknown): Promise<IpcResult<Schedule[]>> => {
+      if (typeof conversationId !== 'string') return err('invalid conversationId')
+      return ok(scheduleRepo.listByConversation(conversationId))
+    }
+  )
+
+  ipcMain.handle(
+    IPC.SchedulesCreate,
+    async (_e, input: unknown): Promise<IpcResult<Schedule>> => {
+      if (!input || typeof input !== 'object') return err('invalid input')
+      const i = input as {
+        conversationId?: unknown
+        name?: unknown
+        trigger?: unknown
+        prompt?: unknown
+      }
+      if (typeof i.conversationId !== 'string') return err('invalid conversationId')
+      if (!conversationRepo.get(i.conversationId)) return err('conversation not found')
+      if (typeof i.prompt !== 'string' || !i.prompt.trim()) return err('empty prompt')
+      const trigger = parseTrigger(i.trigger)
+      if (!trigger) return err('invalid trigger (interval ≥ 60000ms or valid 5-field cron)')
+      const name = typeof i.name === 'string' && i.name.trim() ? i.name.trim() : '定时任务'
+      try {
+        return ok(
+          createSchedule({
+            conversationId: i.conversationId,
+            name,
+            trigger,
+            prompt: i.prompt.trim()
+          })
+        )
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.SchedulesUpdate,
+    async (_e, id: unknown, patch: unknown): Promise<IpcResult<true>> => {
+      if (typeof id !== 'string') return err('invalid id')
+      if (!patch || typeof patch !== 'object') return err('invalid patch')
+      const p = patch as {
+        name?: unknown
+        trigger?: unknown
+        prompt?: unknown
+        enabled?: unknown
+      }
+      const clean: {
+        name?: string
+        trigger?: ScheduleTrigger
+        prompt?: string
+        enabled?: boolean
+      } = {}
+      if (p.name !== undefined) {
+        if (typeof p.name !== 'string') return err('invalid name')
+        clean.name = p.name.trim()
+      }
+      if (p.prompt !== undefined) {
+        if (typeof p.prompt !== 'string' || !p.prompt.trim()) return err('empty prompt')
+        clean.prompt = p.prompt.trim()
+      }
+      if (p.enabled !== undefined) {
+        if (typeof p.enabled !== 'boolean') return err('invalid enabled')
+        clean.enabled = p.enabled
+      }
+      if (p.trigger !== undefined) {
+        const trigger = parseTrigger(p.trigger)
+        if (!trigger) return err('invalid trigger')
+        clean.trigger = trigger
+      }
+      try {
+        updateSchedule(id, clean)
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.SchedulesDelete,
+    async (_e, id: unknown): Promise<IpcResult<true>> => {
+      if (typeof id !== 'string') return err('invalid id')
+      scheduleRepo.delete(id)
       return ok(true)
     }
   )

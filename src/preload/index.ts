@@ -11,6 +11,8 @@ import type {
   Message,
   PresenceActivity,
   Project,
+  Schedule,
+  ScheduleTrigger,
   Side
 } from '../shared/types'
 
@@ -129,6 +131,31 @@ const api = {
         IPC.MessagePatchedEvent,
         cb
       )
+  },
+  /** Timed automation — interval/cron schedules that inject a prompt into an
+   *  existing conversation (same path as a user message → PM). */
+  schedules: {
+    listByConversation: (conversationId: string): Promise<IpcResult<Schedule[]>> =>
+      ipcRenderer.invoke(IPC.SchedulesListByConversation, conversationId),
+    create: (input: {
+      conversationId: string
+      name?: string
+      trigger: ScheduleTrigger
+      prompt: string
+      enabled?: boolean
+    }): Promise<IpcResult<Schedule>> =>
+      ipcRenderer.invoke(IPC.SchedulesCreate, input),
+    update: (
+      id: string,
+      patch: {
+        name?: string
+        trigger?: ScheduleTrigger
+        prompt?: string
+        enabled?: boolean
+      }
+    ): Promise<IpcResult<true>> => ipcRenderer.invoke(IPC.SchedulesUpdate, id, patch),
+    delete: (id: string): Promise<IpcResult<true>> =>
+      ipcRenderer.invoke(IPC.SchedulesDelete, id)
   },
   /** Cross-client presence — used by the desktop renderer to know when a
    *  paired tablet is also touching the same conversation, and vice versa. */

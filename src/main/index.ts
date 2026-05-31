@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { initStorage, closeStorage } from './storage/db'
 import { registerIpcHandlers } from './ipc'
 import { conversationEngine } from './conversation/engine'
+import { startScheduler, stopScheduler } from './conversation/scheduler'
 import { stopAllWatches } from './fs/inspector'
 import { startHttpServer, stopHttpServer } from './server/http-server'
 
@@ -209,6 +210,12 @@ app.whenReady().then(() => {
   initStorage()
   registerIpcHandlers()
 
+  // Timed automation: the scheduler injects canned prompts into existing
+  // conversations on a cadence (same path as a user message → PM).
+  startScheduler((conversationId, text) =>
+    conversationEngine.sendUserMessage(conversationId, text)
+  )
+
   // Start the LAN HTTP+WS companion server so the Android tablet App can
   // talk to this desktop instance. The port is configurable via env so power
   // users can avoid collisions; default 7878.
@@ -276,6 +283,7 @@ app.on('before-quit', () => {
   // app.quit() calls, and OS shutdown.
   isQuitting = true
   void conversationEngine.disposeAll()
+  stopScheduler()
   stopAllWatches()
   void stopHttpServer()
   closeStorage()

@@ -35,6 +35,12 @@ export const IPC = {
   ConversationsSetAutopilot: 'conversations:set-autopilot',
   ConversationsSetPrimarySide: 'conversations:set-primary-side',
 
+  // Schedules (timed automation)
+  SchedulesListByConversation: 'schedules:list-by-conversation',
+  SchedulesCreate: 'schedules:create',
+  SchedulesUpdate: 'schedules:update',
+  SchedulesDelete: 'schedules:delete',
+
   // Events (main → renderer)
   ConversationUpdatedEvent: 'conversation:updated', // ConversationView snapshot
   MessageAppendedEvent: 'conversation:message-appended', // { conversationId, message }

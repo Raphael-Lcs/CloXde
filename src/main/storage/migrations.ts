@@ -215,6 +215,32 @@ const MIGRATIONS: Migration[] = [
         ALTER TABLE messages ADD COLUMN metrics_json TEXT;
       `)
     }
+  },
+  {
+    version: 10,
+    name: 'schedules',
+    up(db) {
+      // Timed automation: a schedule fires on a timer and injects a canned
+      // prompt into an existing conversation (sent to PM, same path as a user
+      // message). trigger_json holds the discriminated union (interval | cron);
+      // next_fire_at is the precomputed epoch-ms the ticker compares against.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS schedules (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          name TEXT NOT NULL DEFAULT '',
+          trigger_json TEXT NOT NULL,
+          prompt TEXT NOT NULL DEFAULT '',
+          enabled INTEGER NOT NULL DEFAULT 1,
+          next_fire_at INTEGER NOT NULL,
+          last_fired_at INTEGER,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_schedules_conv ON schedules(conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules(enabled, next_fire_at);
+      `)
+    }
   }
 ]
 
