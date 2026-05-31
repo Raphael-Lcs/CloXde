@@ -3,6 +3,7 @@ import { IPC } from '../shared/ipc-channels'
 import type {
   AgentKind,
   AgentProfile,
+  AssistantActivity,
   AssistantMemory,
   AssistantReport,
   AssistantTurn,
@@ -175,10 +176,13 @@ const api = {
       ipcRenderer.invoke(IPC.AssistantSendMessage, text, attachments),
     resetSession: (): Promise<IpcResult<true>> =>
       ipcRenderer.invoke(IPC.AssistantResetSession),
+    cancel: (): Promise<IpcResult<true>> => ipcRenderer.invoke(IPC.AssistantCancel),
     listMemories: (limit?: number): Promise<IpcResult<AssistantMemory[]>> =>
       ipcRenderer.invoke(IPC.AssistantListMemories, limit),
     onReport: (cb: (report: AssistantReport) => void): Unsubscribe =>
-      on<AssistantReport>(IPC.AssistantReportEvent, cb)
+      on<AssistantReport>(IPC.AssistantReportEvent, cb),
+    onActivity: (cb: (activity: AssistantActivity) => void): Unsubscribe =>
+      on<AssistantActivity>(IPC.AssistantActivityEvent, cb)
   },
   fs: {
     listDir: (projectId: string, relPath: string): Promise<IpcResult<DirEntry[]>> =>

@@ -17,21 +17,51 @@ export interface RememberInput {
 }
 
 export class MemoryService {
+  /** vec0 L2 distance below which two same-kind memories are treated as the
+   *  same fact. Embeddings are L2-normalized, so L2² = 2(1−cos); 0.35 ≈ cosine
+   *  0.94 — "restating the same thing", not merely "related". */
+  private static readonly DEDUP_DISTANCE = 0.35
+
   constructor(private embedder: Embedder = getEmbedder()) {}
 
-  /** Embed and store a single memory. */
+  /** Embed and store a single memory. Near-duplicate guard: the brain restates
+   *  the same fact across turns, so before inserting we look for a near-identical
+   *  memory of the SAME kind and, if found, fold the new statement into it
+   *  (refresh content, reinforce confidence, re-embed) instead of piling up
+   *  copies that crowd recall. */
   async remember(input: RememberInput): Promise<AssistantMemory> {
     const [embedding] = await this.embedder.embed([input.content])
-    return memoryRepo.insert({ ...input, embedding })
+    return this.upsert(input, embedding)
   }
 
-  /** Batch variant — one embedding call for many memories. */
+  /** Batch variant — one embedding call for many memories. Items are upserted
+   *  sequentially so a near-duplicate WITHIN the batch folds into the row the
+   *  earlier item just wrote, not just duplicates already in the DB. */
   async rememberMany(inputs: RememberInput[]): Promise<AssistantMemory[]> {
     if (inputs.length === 0) return []
     const embeddings = await this.embedder.embed(inputs.map((i) => i.content))
-    return inputs.map((input, i) =>
-      memoryRepo.insert({ ...input, embedding: embeddings[i] })
-    )
+    return inputs.map((input, i) => this.upsert(input, embeddings[i]))
+  }
+
+  /** Fold `input` into a near-identical same-kind memory if one exists, else
+   *  insert. Shared by remember / rememberMany. */
+  private upsert(input: RememberInput, embedding: Float32Array): AssistantMemory {
+    const [nearest] = memoryRepo.searchByVector(embedding, 1, { kind: input.kind })
+    if (nearest && nearest.distance < MemoryService.DEDUP_DISTANCE) {
+      const confidence = Math.min(
+        1,
+        Math.max(nearest.confidence, input.confidence ?? 0.5) + 0.05
+      )
+      memoryRepo.patch(nearest.id, {
+        content: input.content,
+        confidence,
+        source: input.source
+      })
+      memoryRepo.updateEmbedding(nearest.id, embedding)
+      memoryRepo.touch([nearest.id])
+      return memoryRepo.get(nearest.id) ?? memoryRepo.insert({ ...input, embedding })
+    }
+    return memoryRepo.insert({ ...input, embedding })
   }
 
   /** Semantic recall. Returns the k memories most relevant to `query`,

@@ -220,6 +220,16 @@ export interface AssistantReport {
   conversationId?: string
 }
 
+/** Live progress of an in-flight assistant turn, streamed so the UI can show
+ *  the brain is actually working (thinking / using a tool / blocked) instead of
+ *  a dead "thinking…" spinner. Pushed over AssistantActivityEvent. */
+export interface AssistantActivity {
+  phase: 'start' | 'thought' | 'tool' | 'blocked' | 'done' | 'error'
+  /** Human-readable detail for thought/tool/blocked/error phases. */
+  text?: string
+  ts: number
+}
+
 /** The outcome of one assistant turn (a user message handled by the brain):
  *  what it said and what it did. */
 export interface AssistantTurn {

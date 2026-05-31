@@ -1,22 +1,25 @@
-// The assistant's action surface — the ONLY things it is allowed to *do*.
+// The assistant's *structured* action surface — the directives the brain emits
+// as tag blocks (parsed in brain.ts) turn into calls here.
 //
-// This module is where the project's hard boundary lives: the assistant
-// discovers, decides, and delegates, but never writes code itself. Concretely
-// its levers are:
+// NOTE (revised 2026-05-31): this is NOT the brain's whole reach. The brain is a
+// full tool-capable ACP agent — it reads/writes files and runs commands with its
+// own hands (see brain.ts → allowAllPermission + readWriteFs). The functions
+// below are the *team-aware* levers layered on top of that:
 //   • createProject  — scaffold a project in its own workspace
-//   • briefTeam      — open a team conversation and hand it a brief (all coding
-//                      happens here, inside the team)
+//   • briefTeam      — open a team conversation and hand it a brief (where a
+//                      substantial build/feature/fix is carried out by the team)
 //   • dispatchProject — the common case: create + brief in one call
 //   • remember / recall — read & write its own long-term memory
-//   • reportToUser   — surface something to the user (via the assistant bus)
+//   • reportToUser   — surface a proactive message to the user (via the bus)
+//   • emitActivity   — stream live turn progress to the UI
 //
-// There is deliberately no "edit file" / "run command" action. The assistant's
-// hands-on filesystem reach stops at creating a project directory; everything
-// else is delegated to the team it dispatches.
+// The division of labor is judgment, not capability: small/查证/一次性 work the
+// brain does directly with its tools; substantial work it DISPATCHes to a team.
 
 import { EventEmitter } from 'node:events'
 import type {
   AgentKind,
+  AssistantActivity,
   AssistantMemory,
   AssistantReport,
   Conversation,
@@ -122,4 +125,11 @@ export function reportToUser(report: Omit<AssistantReport, 'ts'>): void {
   const full: AssistantReport = { ts: Date.now(), ...report }
   console.log('[assistant] report:', full.message)
   assistantBus.emit('report', full)
+}
+
+/** Emit live turn progress (thinking / using a tool / blocked / done) so the UI
+ *  can show the brain is actually working instead of a dead spinner. The 'ts'
+ *  is stamped here; callers pass just phase + optional text. */
+export function emitActivity(activity: Omit<AssistantActivity, 'ts'>): void {
+  assistantBus.emit('activity', { ts: Date.now(), ...activity } as AssistantActivity)
 }

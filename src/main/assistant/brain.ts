@@ -1,23 +1,27 @@
 // The assistant's brain: a single long-lived ACP session (default Claude Code)
-// running with the delegator system prompt. It is the judgment layer — it takes
-// a *signal* (user message, team turn-end, capability gap, instability, cron),
-// recalls relevant memory, thinks, and emits tagged directives. The main
-// process parses those directives and performs the actual actions (dispatch a
-// team, write memory, report to the user) via the actions module.
+// running with the 管家 system prompt. It is the judgment+action layer — it
+// takes a *signal* (user message, team turn-end, capability gap, instability,
+// cron), recalls relevant memory, thinks, and either acts directly with its own
+// tools or delegates to a team.
 //
-// The "assistant never writes code" boundary is enforced HERE at the runtime
-// level, not just by the prompt: the brain's permission policy denies every
-// tool call, and its fs policy refuses all writes. Reads are allowed so the
-// brain can do read-only discovery if it ever needs to, but it cannot touch a
-// single file. All building/editing happens in the teams it dispatches.
+// Capability model (revised 2026-05-31, user correction): like Hermes/openclaw,
+// the brain is a FULL tool-capable agent — it can read, write, and run things
+// itself. What distinguishes it is *team awareness*: it does small/direct work
+// with its own hands, but dispatches substantial build/feature/fix work to a
+// dedicated team (PM+architect+executor) via <<DISPATCH>>. Permissions are
+// auto-approved (full autonomy) and the fs policy allows reads AND writes. The
+// earlier "deny every tool" boundary was the wrong model — it made a tool-first
+// agent spin on denials — and has been removed.
 
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
   WriteTextFileRequest,
+  WriteTextFileResponse,
   SessionNotification,
   ContentBlock
 } from '@agentclientprotocol/sdk'
@@ -67,22 +71,25 @@ function brainProfile(): AgentProfile {
   }
 }
 
-// Deny EVERY tool-permission request. The brain has no hands; if the model ever
-// asks to run/edit something, we reject so it falls back to emitting directives.
-const denyAllPermission = async (
+// Auto-approve EVERY tool-permission request — the brain has full autonomy and
+// real hands. We still surface a 'tool' activity (from the update stream) so the
+// user can watch what it's doing; the approval itself is silent.
+const allowAllPermission = async (
   params: RequestPermissionRequest
 ): Promise<RequestPermissionResponse> => {
-  const reject =
-    params.options.find((o) => o.kind === 'reject_once') ??
-    params.options.find((o) => o.kind === 'reject_always')
-  return reject
-    ? { outcome: { outcome: 'selected', optionId: reject.optionId } }
+  const allow =
+    params.options.find((o) => o.kind === 'allow_always') ??
+    params.options.find((o) => o.kind === 'allow_once') ??
+    params.options[0]
+  return allow
+    ? { outcome: { outcome: 'selected', optionId: allow.optionId } }
     : { outcome: { outcome: 'cancelled' } }
 }
 
-// Reads allowed (read-only discovery can't violate the boundary); writes always
-// refused — this is the filesystem half of the "assistant never edits" rule.
-const readonlyFs = {
+// Full read/write filesystem access. Unlike a team (sandboxed to its project
+// root), the 管家 may touch the workspace and beyond — it manages "life + work
+// + machines", so we don't fence it to a single directory.
+const readWriteFs = {
   async readTextFile(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
     const text = await readFile(params.path, 'utf-8')
     if (params.limit || params.line) {
@@ -93,8 +100,10 @@ const readonlyFs = {
     }
     return { content: text }
   },
-  async writeTextFile(_params: WriteTextFileRequest): Promise<never> {
-    throw new Error('assistant is read-only — file changes must be delegated to a team')
+  async writeTextFile(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
+    await mkdir(dirname(params.path), { recursive: true })
+    await writeFile(params.path, params.content, 'utf-8')
+    return {}
   }
 }
 
@@ -111,12 +120,36 @@ function extractAll(text: string, tag: string): string[] {
   return out
 }
 
+/** Remove all directive tag blocks (DISPATCH/REMEMBER/REPORT) from the brain's
+ *  output, leaving just the natural-language reply to show the user. */
+function stripDirectives(text: string): string {
+  return text
+    .replace(/<<(DISPATCH|REMEMBER|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 export class AssistantBrain {
+  /** Upper bound on a single think() turn. The 管家 may do real tool work
+   *  itself, so this is generous — substantial/long work is delegated to a
+   *  team, so a turn past this is almost certainly wedged (a stuck tool). We
+   *  cancel and surface an error instead of leaving the UI spinning forever. */
+  private static readonly TURN_TIMEOUT_MS = 240_000
   private runtime: AcpRuntime | null = null
   private systemPromptSent = false
   private buffer = ''
   /** Serializes think() calls — one ACP session, one turn at a time. */
   private chain: Promise<unknown> = Promise.resolve()
+  /** Count of think() calls not yet settled. The brain is a heavy local
+   *  process; the review loop checks this so a proactive pass never piles up
+   *  behind an active user conversation (which would drag the machine while the
+   *  user is right there using it). */
+  private inFlight = 0
+
+  /** True while at least one think() turn is queued or running. */
+  isBusy(): boolean {
+    return this.inFlight > 0
+  }
 
   private ensureRuntime(): AcpRuntime {
     if (this.runtime) return this.runtime
@@ -129,15 +162,29 @@ export class AssistantBrain {
     const rt = new AcpRuntime({
       profile: brainProfile(),
       cwd: getWorkspaceDir(),
-      permission: denyAllPermission,
-      fs: readonlyFs
+      permission: allowAllPermission,
+      fs: readWriteFs,
+      // Keep the delegator identity correct across (re)connections. The brain
+      // is one long-lived session, but an adapter crash respawns it: runtime
+      // either restores the prior session (system prompt context intact) or
+      // opens a fresh one (needs the prompt re-sent). Without this, a fresh
+      // post-crash session would inherit systemPromptSent=true and silently
+      // run as a plain assistant with no team awareness.
+      onSessionReady: (_sessionId, restored) => {
+        this.systemPromptSent = restored
+      }
     })
     rt.on('update', (n: SessionNotification) => {
-      if (
-        n.update.sessionUpdate === 'agent_message_chunk' &&
-        n.update.content.type === 'text'
-      ) {
-        this.buffer += n.update.content.text
+      const u = n.update
+      if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
+        this.buffer += u.content.text
+      } else if (u.sessionUpdate === 'agent_thought_chunk' && u.content.type === 'text') {
+        // The model's reasoning — the best liveness signal. Stream it as a
+        // 'thought' activity so the UI proves the brain is working.
+        actions.emitActivity({ phase: 'thought', text: u.content.text })
+      } else if (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') {
+        const title = u.title ?? u.kind ?? 'tool'
+        actions.emitActivity({ phase: 'tool', text: title })
       }
     })
     rt.on('error', (err: Error) => console.error('[assistant-brain] error:', err.message))
@@ -148,39 +195,82 @@ export class AssistantBrain {
   /** Wake the brain with a signal. Recalls memory, prompts the brain, parses
    *  and executes the directives it emits. Calls are serialized. */
   think(signal: Signal): Promise<ThinkResult> {
+    this.inFlight++
     const run = this.chain.then(() => this.thinkOnce(signal))
     // Keep the chain alive regardless of this call's outcome.
     this.chain = run.catch(() => undefined)
-    return run
+    return run.finally(() => {
+      this.inFlight--
+    })
   }
 
   private async thinkOnce(signal: Signal): Promise<ThinkResult> {
     const memory = getMemoryService()
     const hits = await memory.recall(signal.text, { k: 6 })
-    // Decide up front whether THIS prompt carries the system prompt, but don't
-    // mark it delivered until prompt() actually succeeds — otherwise a failed
-    // first turn (e.g. adapter spawn error) would burn the flag and every later
-    // turn would run with no delegator identity, reverting the brain to a plain
-    // coding assistant.
-    const includeSystem = !this.systemPromptSent
-    const promptText = this.buildPrompt(signal, hits, includeSystem)
-
-    // Build content blocks: text prompt + any image/file attachments the user
-    // sent. The adapter (Claude Code) supports multimodal input.
-    const blocks: ContentBlock[] = [{ type: 'text', text: promptText }]
-    if (signal.attachments) {
-      for (const att of signal.attachments) {
-        blocks.push({ type: 'image', data: att.data, mimeType: att.mimeType })
-      }
-    }
 
     const rt = this.ensureRuntime()
     this.buffer = ''
-    await rt.prompt(blocks)
-    if (includeSystem) this.systemPromptSent = true
+    actions.emitActivity({ phase: 'start' })
+    try {
+      // Bring the session up FIRST so onSessionReady has run and
+      // systemPromptSent reflects the real session state (fresh vs restored).
+      // Deciding includeSystem before this would race a post-crash respawn: a
+      // fresh session could be left without the delegator prompt. start() is
+      // idempotent — the prompt() below reuses the now-live session.
+      await rt.start()
+      // Don't mark the prompt delivered until prompt() actually succeeds —
+      // otherwise a failed turn (e.g. adapter spawn error) would burn the flag
+      // and every later turn would run with no delegator identity.
+      const includeSystem = !this.systemPromptSent
+      const promptText = this.buildPrompt(signal, hits, includeSystem)
+
+      // Build content blocks: text prompt + any image/file attachments the user
+      // sent. The adapter (Claude Code) supports multimodal input.
+      const blocks: ContentBlock[] = [{ type: 'text', text: promptText }]
+      if (signal.attachments) {
+        for (const att of signal.attachments) {
+          blocks.push({ type: 'image', data: att.data, mimeType: att.mimeType })
+        }
+      }
+
+      await this.promptWithTimeout(rt, blocks)
+      if (includeSystem) this.systemPromptSent = true
+    } catch (e) {
+      actions.emitActivity({ phase: 'error', text: (e as Error).message })
+      throw e
+    }
     const raw = this.buffer.trim()
 
-    return this.executeDirectives(raw, signal)
+    // executeDirectives can do real, slow work (a DISPATCH kicks off a team
+    // turn). Keep the turn "live" through it and emit 'done' only once the
+    // directives have actually run, so the UI reflects the whole turn.
+    const result = await this.executeDirectives(raw, signal)
+    actions.emitActivity({ phase: 'done' })
+    return result
+  }
+
+  /** Race the ACP turn against TURN_TIMEOUT_MS. On timeout we cancel the
+   *  in-flight turn (so the adapter stops working) and throw, breaking an
+   *  otherwise-infinite "thinking…" stall. */
+  private async promptWithTimeout(rt: AcpRuntime, blocks: ContentBlock[]): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        void rt.cancel()
+        reject(new Error('助理这一轮超时了（可能在反复尝试被拦截的操作），已中断'))
+      }, AssistantBrain.TURN_TIMEOUT_MS)
+    })
+    try {
+      await Promise.race([rt.prompt(blocks), timeout])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /** Interrupt the in-flight turn (if any). The serialized think() chain settles
+   *  on its own once prompt() rejects/resolves. */
+  async cancel(): Promise<void> {
+    if (this.runtime) await this.runtime.cancel()
   }
 
   private buildPrompt(signal: Signal, hits: MemoryHit[], includeSystem: boolean): string {
@@ -199,7 +289,11 @@ export class AssistantBrain {
   }
 
   private async executeDirectives(raw: string, signal: Signal): Promise<ThinkResult> {
-    const result: ThinkResult = { raw, dispatched: [], remembered: 0, reports: [] }
+    // `raw` mixes the brain's natural reply with directive tag blocks. Strip the
+    // tags so what we surface as the assistant's message is just the prose; the
+    // tags are consumed below as actions.
+    const reply = stripDirectives(raw)
+    const result: ThinkResult = { raw: reply, dispatched: [], remembered: 0, reports: [] }
 
     // REMEMBER first so a memory the brain just formed is stored before any
     // report references it.
@@ -207,6 +301,7 @@ export class AssistantBrain {
       const parsed = safeJson<{ kind?: string; content?: string }>(body)
       if (!parsed?.content) continue
       const kind = isMemoryKind(parsed.kind) ? parsed.kind : 'fact'
+      actions.emitActivity({ phase: 'tool', text: '记下记忆' })
       await actions.remember({ kind, content: parsed.content, source: signal.kind })
       result.remembered++
     }
@@ -215,6 +310,7 @@ export class AssistantBrain {
       const parsed = safeJson<{ name?: string; brief?: string }>(body)
       if (!parsed?.name || !parsed?.brief) continue
       try {
+        actions.emitActivity({ phase: 'tool', text: `派出团队「${parsed.name}」` })
         const { project, conversation } = await actions.dispatchProject({
           name: parsed.name,
           brief: parsed.brief

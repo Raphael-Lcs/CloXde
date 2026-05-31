@@ -18,6 +18,7 @@ import { projectRepo, conversationRepo, messageRepo } from '../storage/db'
 import { conversationEngine } from '../conversation/engine'
 import { getWorkspaceDir } from '../paths'
 import { getAssistantBrain, type Signal } from './brain'
+import { getMemoryService } from './memory'
 import type { Message, Project } from '@shared/types'
 
 type AnyBusyFn = () => boolean
@@ -25,9 +26,14 @@ type ThinkFn = (signal: Signal) => Promise<unknown>
 
 const REVIEW_INTERVAL_MS = 5 * 60 * 1000
 const MESSAGES_PER_CONV = 6
+/** How often the decay pass runs. Memory is otherwise append-only, so without
+ *  this it grows unbounded — stale, low-confidence, unpinned memories never
+ *  leave. Daily is plenty: pruning is cheap and the staleness window is 30d. */
+const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 let timer: ReturnType<typeof setInterval> | null = null
 let running = false
+let lastPrunedAt = 0
 /** Newest team-message ts the brain has already reviewed. A pass that sees
  *  nothing newer skips, so a long-idle machine doesn't re-think the same state. */
 let lastReviewedTs = 0
@@ -75,9 +81,25 @@ function gatherSnapshot(): { text: string; newestTs: number } | null {
   return { text: sections.join('\n\n'), newestTs }
 }
 
-async function runPass(anyBusy: AnyBusyFn, think: ThinkFn): Promise<void> {
+/** Run the memory decay pass at most once per PRUNE_INTERVAL_MS. Pure DB work
+ *  (no model), so it's exempt from the quiet-window gate. */
+function maybePrune(): void {
+  const now = Date.now()
+  if (now - lastPrunedAt < PRUNE_INTERVAL_MS) return
+  lastPrunedAt = now
+  try {
+    const dropped = getMemoryService().prune()
+    if (dropped > 0) console.log(`[assistant-review] pruned ${dropped} stale memories`)
+  } catch (e) {
+    console.error('[assistant-review] prune failed:', (e as Error).message)
+  }
+}
+
+async function runPass(anyBusy: AnyBusyFn, think: ThinkFn, brainBusy: AnyBusyFn): Promise<void> {
+  maybePrune() // cheap, model-free — run regardless of the quiet-window gate
   if (running) return // a slow brain pass must not overlap the next tick
   if (anyBusy()) return // quiet-window gate: never run the brain while a team works
+  if (brainBusy()) return // …or while the user is mid-conversation with it
   const snapshot = gatherSnapshot()
   if (!snapshot) return
   running = true
@@ -99,16 +121,18 @@ async function runPass(anyBusy: AnyBusyFn, think: ThinkFn): Promise<void> {
 export function startAssistantReview(opts?: {
   anyBusy?: AnyBusyFn
   think?: ThinkFn
+  brainBusy?: AnyBusyFn
   intervalMs?: number
 }): void {
   if (timer) return
   const anyBusy = opts?.anyBusy ?? (() => conversationEngine.anyBusy())
   const think = opts?.think ?? ((s: Signal) => getAssistantBrain().think(s))
+  const brainBusy = opts?.brainBusy ?? (() => getAssistantBrain().isBusy())
   // Seed lastReviewedTs to "now" so the first pass reviews only NEW activity,
   // not the entire backlog from before the app started.
   lastReviewedTs = Date.now()
   timer = setInterval(
-    () => void runPass(anyBusy, think),
+    () => void runPass(anyBusy, think, brainBusy),
     opts?.intervalMs ?? REVIEW_INTERVAL_MS
   )
   if (typeof timer.unref === 'function') timer.unref()
@@ -121,4 +145,5 @@ export function stopAssistantReview(): void {
   }
   running = false
   lastReviewedTs = 0
+  lastPrunedAt = 0
 }

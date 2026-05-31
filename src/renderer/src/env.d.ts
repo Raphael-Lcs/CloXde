@@ -5,6 +5,7 @@
 import type {
   AgentKind,
   AgentProfile,
+  AssistantActivity,
   AssistantMemory,
   AssistantReport,
   AssistantTurn,
@@ -111,8 +112,10 @@ interface CloXdeApi {
       attachments?: { data: string; mimeType: string }[]
     ) => Promise<IpcResult<AssistantTurn>>
     resetSession: () => Promise<IpcResult<true>>
+    cancel: () => Promise<IpcResult<true>>
     listMemories: (limit?: number) => Promise<IpcResult<AssistantMemory[]>>
     onReport: (cb: (report: AssistantReport) => void) => Unsubscribe
+    onActivity: (cb: (activity: AssistantActivity) => void) => Unsubscribe
   }
   schedules: {
     listByConversation: (conversationId: string) => Promise<IpcResult<Schedule[]>>

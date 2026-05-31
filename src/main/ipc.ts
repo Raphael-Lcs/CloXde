@@ -4,6 +4,7 @@ import { existsSync, statSync } from 'node:fs'
 import type {
   AgentKind,
   AgentProfile,
+  AssistantActivity,
   AssistantMemory,
   AssistantReport,
   AssistantTurn,
@@ -110,6 +111,12 @@ export function registerIpcHandlers(): void {
   // The assistant's proactive reports (from the review loop) → renderer.
   assistantBus.on('report', (report: AssistantReport) => {
     broadcast(IPC.AssistantReportEvent, report)
+  })
+
+  // Live turn progress (thinking / tool / blocked / done) → renderer, so the
+  // assistant panel can show the brain is working instead of a dead spinner.
+  assistantBus.on('activity', (activity: AssistantActivity) => {
+    broadcast(IPC.AssistantActivityEvent, activity)
   })
 
   // --- App ---------------------------------------------------------------
@@ -631,6 +638,18 @@ export function registerIpcHandlers(): void {
       // brain otherwise keeps one long-lived session across mode toggles.
       try {
         await getAssistantBrain().dispose()
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.AssistantCancel,
+    async (): Promise<IpcResult<true>> => {
+      try {
+        await getAssistantBrain().cancel()
         return ok(true)
       } catch (e) {
         return err((e as Error).message)

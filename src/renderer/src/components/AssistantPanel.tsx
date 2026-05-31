@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AssistantReport } from '@shared/types'
+import type { AssistantActivity, AssistantReport } from '@shared/types'
 
 // The standalone assistant view: a direct chat with the user-scoped assistant
 // (the layer above the team). The user talks to it here; it decides, delegates
@@ -41,6 +41,11 @@ export function AssistantPanel(): JSX.Element {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [sending, setSending] = useState(false)
   const [dragOver, setDragOver] = useState(false)
+  // Live turn status: the latest activity line from the brain + when the turn
+  // started, so we can show "💭 …（12s）" instead of a dead spinner.
+  const [liveStatus, setLiveStatus] = useState<string>('')
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null)
+  const [elapsed, setElapsed] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
   const attachIdRef = useRef(0)
 
@@ -71,6 +76,49 @@ export function AssistantPanel(): JSX.Element {
     })
     return off
   }, [append])
+
+  // Live turn progress — proves the brain is actually working (thinking / using
+  // a tool / blocked) instead of leaving a dead "thinking…" spinner.
+  useEffect(() => {
+    if (!window.api.assistant?.onActivity) return
+    const off = window.api.assistant.onActivity((a: AssistantActivity) => {
+      switch (a.phase) {
+        case 'start':
+          setTurnStartedAt(Date.now())
+          setLiveStatus('思考中…')
+          break
+        case 'thought':
+          setLiveStatus(`💭 ${oneLine(a.text)}`)
+          break
+        case 'tool':
+          setLiveStatus(`🔧 ${oneLine(a.text)}`)
+          break
+        case 'blocked':
+          setLiveStatus(`⛔ ${oneLine(a.text)}`)
+          break
+        case 'done':
+        case 'error':
+          setTurnStartedAt(null)
+          setLiveStatus('')
+          break
+      }
+    })
+    return off
+  }, [])
+
+  // Tick the elapsed-seconds counter while a turn is in flight.
+  useEffect(() => {
+    if (turnStartedAt == null) {
+      setElapsed(0)
+      return
+    }
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - turnStartedAt) / 1000)), 500)
+    return () => clearInterval(id)
+  }, [turnStartedAt])
+
+  const cancel = useCallback(() => {
+    void window.api.assistant?.cancel()
+  }, [])
 
   const addBlob = useCallback(async (blob: Blob) => {
     if (!blob.type.startsWith('image/')) return
@@ -150,6 +198,17 @@ export function AssistantPanel(): JSX.Element {
       if (turn.remembered > 0) {
         append('system', `记下了 ${turn.remembered} 条记忆。`)
       }
+      // Never leave the user staring at silence: if this turn produced no
+      // visible output at all (no prose, no report, no dispatch), say so
+      // explicitly instead of looking hung.
+      const producedSomething =
+        (turn.reports.length === 0 && turn.raw) ||
+        turn.reports.length > 0 ||
+        turn.dispatched.length > 0 ||
+        turn.remembered > 0
+      if (!producedSomething) {
+        append('system', '助理这一轮没有给出可见回应（可能在内部用工具忙活）。可以再说一句或换个说法。')
+      }
     } catch (e) {
       append('system', `出错：${(e as Error).message}`)
     } finally {
@@ -221,7 +280,18 @@ export function AssistantPanel(): JSX.Element {
             </div>
           ))
         )}
-        {sending && <div className="assistant-msg role-system">助理思考中…</div>}
+        {sending && (
+          <div className="assistant-live">
+            <span className="assistant-live-dot" />
+            <span className="assistant-live-text">
+              {liveStatus || '助理思考中…'}
+              {turnStartedAt != null && elapsed > 0 ? `（${elapsed}s）` : ''}
+            </span>
+            <button className="assistant-live-cancel" onClick={cancel} title="打断这一轮">
+              打断
+            </button>
+          </div>
+        )}
       </div>
       <div
         className={`assistant-composer ${dragOver ? 'drag-over' : ''}`}
@@ -287,4 +357,11 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** Collapse a streamed chunk to a single trimmed line for the status strip. */
+function oneLine(s: string | undefined): string {
+  if (!s) return ''
+  const flat = s.replace(/\s+/g, ' ').trim()
+  return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat
 }

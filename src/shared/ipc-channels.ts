@@ -44,8 +44,10 @@ export const IPC = {
   // Assistant (the user-scoped layer above the team)
   AssistantSendMessage: 'assistant:send-message', // user → brain, returns AssistantTurn
   AssistantResetSession: 'assistant:reset-session', // /new — dispose the brain's ACP session so the next turn starts fresh
+  AssistantCancel: 'assistant:cancel', // interrupt the in-flight brain turn
   AssistantListMemories: 'assistant:list-memories',
   AssistantReportEvent: 'assistant:report', // main → renderer, proactive AssistantReport
+  AssistantActivityEvent: 'assistant:activity', // main → renderer, live turn progress (AssistantActivity)
 
   // Events (main → renderer)
   ConversationUpdatedEvent: 'conversation:updated', // ConversationView snapshot
