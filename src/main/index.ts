@@ -250,6 +250,19 @@ app.whenReady().then(() => {
   setupTray()
   configureAutoLaunch()
 
+  // Smoke-boot mode (self-modification gate): when CLOXDE_SMOKE_MS is set, we
+  // boot the full normal path above (storage, IPC, scheduler, LAN server) and
+  // then exit 0 after the window. A clean exit proves the new code actually
+  // starts up; a crash before this fires makes the gate fail. We do NOT create
+  // the tray-resident lifecycle expectation here — exit(0) is deliberate.
+  const smokeMs = Number(process.env.CLOXDE_SMOKE_MS)
+  if (Number.isFinite(smokeMs) && smokeMs > 0) {
+    setTimeout(() => {
+      console.log('[smoke] healthy boot confirmed, exiting 0')
+      app.exit(0)
+    }, smokeMs)
+  }
+
   const win = createWindow()
 
   // If a deep link arrived before the window existed, fire it now that

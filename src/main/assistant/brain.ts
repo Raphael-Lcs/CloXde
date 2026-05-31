@@ -622,6 +622,33 @@ export class AssistantBrain {
       }
     }
 
+    // SELFMOD — dispatch a self-improvement run (Milestone 2). The brain treats
+    // "improve CloXde itself" as a special project: the team works in an isolated
+    // git worktree on a dedicated branch. Once the team settles, the brain runs
+    // gates (typecheck/test/build/smoke) and, if all pass, merges the branch back
+    // and restarts onto the new code. Only available in dev (isSelfModAvailable).
+    for (const body of extractAll(raw, 'SELFMOD')) {
+      const parsed = safeJson<{ name?: string; brief?: string }>(body)
+      if (!parsed?.name || !parsed?.brief) continue
+      try {
+        actions.emitActivity({ phase: 'tool', text: `启动自我改进「${parsed.name}」` })
+        const handle = await actions.dispatchSelfImprovement({
+          name: parsed.name,
+          brief: parsed.brief
+        })
+        result.dispatched.push({
+          name: handle.project.name,
+          projectId: handle.project.id,
+          conversationId: handle.conversation.id
+        })
+        // Store the handle so the review loop can promote it once the team settles.
+        // We attach it to the project record as a transient field (not persisted).
+        ;(handle.project as any)._selfModHandle = handle
+      } catch (e) {
+        console.error('[assistant-brain] selfmod dispatch failed:', (e as Error).message)
+      }
+    }
+
     // CONTINUE — send a follow-up into an EXISTING team conversation (nudge,
     // re-brief, answer) instead of creating a new project. Used heavily by the
     // review loop to push a team that's already running forward.

@@ -3,14 +3,15 @@
 // without dragging the whole brain module graph.
 //
 // The brain emits its natural-language reply interleaved with `<<TAG>> body <</TAG>>`
-// blocks (DISPATCH/CONTINUE/REMEMBER/FORGET/UPDATE/SCHEDULE/REPORT). The closing tag
-// is optional: a body runs until the next tag or end of text — lenient on purpose,
+// blocks (DISPATCH/SELFMOD/CONTINUE/REMEMBER/FORGET/UPDATE/SCHEDULE/REPORT). The closing
+// tag is optional: a body runs until the next tag or end of text — lenient on purpose,
 // since the model sometimes drops the closer.
 
 /** All directive tags the brain may emit, in one place so extract + strip stay in
  *  sync (a tag stripped from the reply but not extractable, or vice-versa, is a bug). */
 export const DIRECTIVE_TAGS = [
   'DISPATCH',
+  'SELFMOD',
   'CONTINUE',
   'REMEMBER',
   'FORGET',

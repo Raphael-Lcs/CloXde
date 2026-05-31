@@ -32,6 +32,13 @@ import { conversationRepo, profileRepo, projectRepo, assistantReminderRepo } fro
 import { conversationEngine } from '../conversation/engine'
 import { createProject } from './workspace'
 import { getMemoryService, type RememberInput } from './memory'
+import {
+  dispatchSelfImprovement as dispatchSelfImprovementCore,
+  promoteSelfImprovement,
+  restartIntoNewCode,
+  type SelfImprovementInput,
+  type SelfImprovementHandle
+} from './selfmod'
 
 export interface BriefTeamInput {
   projectId: string
@@ -194,4 +201,41 @@ export function reportToUser(report: Omit<AssistantReport, 'ts'>): void {
  *  is stamped here; callers pass just phase + optional text. */
 export function emitActivity(activity: Omit<AssistantActivity, 'ts'>): void {
   assistantBus.emit('activity', { ts: Date.now(), ...activity } as AssistantActivity)
+}
+
+// =============================================================================
+//                          SELF-MODIFICATION (M2)
+// =============================================================================
+
+/** Dispatch a self-improvement run: create an isolated worktree + branch, brief
+ *  a team into it. The brain calls this when the user asks it to improve CloXde
+ *  itself. Returns the handle the brain uses to later promote (or discard) the
+ *  run once the team settles. Only available in dev (isSelfModAvailable). */
+export async function dispatchSelfImprovement(
+  input: SelfImprovementInput
+): Promise<SelfImprovementHandle> {
+  return dispatchSelfImprovementCore(input)
+}
+
+/** Run gates + promote a self-improvement run. The brain calls this after the
+ *  team it dispatched has settled (status awaiting-user or ended). If all gates
+ *  pass, the branch merges back and the app restarts onto the new code. On any
+ *  failure the worktree is discarded. The brain surfaces the verdict to the user
+ *  and, on rejection, can re-brief the team with the gate failure detail. */
+export async function promoteSelfImprovementRun(
+  handle: SelfImprovementHandle
+): Promise<{ promoted: boolean; reason?: string }> {
+  emitActivity({ phase: 'tool', text: '正在运行闸门序列（install/typecheck/test/build/smoke）…' })
+  const result = await promoteSelfImprovement(handle, {
+    onProgress: (gate, phase) => {
+      if (phase === 'start') emitActivity({ phase: 'tool', text: `闸门: ${gate}` })
+    }
+  })
+  if (result.promoted) {
+    emitActivity({ phase: 'tool', text: '所有闸门通过，已合并新代码，即将重启…' })
+    // Give the UI a moment to render the success message before we hard-exit.
+    setTimeout(() => restartIntoNewCode(), 1500)
+    return { promoted: true }
+  }
+  return { promoted: false, reason: result.reason }
 }

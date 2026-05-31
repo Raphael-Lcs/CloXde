@@ -26,7 +26,7 @@ function err(message: string): IpcResult<never> {
 // a multi-megabyte string into the renderer.
 const DIFF_MAX_BYTES = 512 * 1024
 
-interface GitRun {
+export interface GitRun {
   code: number
   stdout: string
   stderr: string
@@ -35,7 +35,7 @@ interface GitRun {
 /** Run git in `cwd`. Resolves (never rejects) with the exit code so callers
  *  can treat the "differences found" exit-1 from `git diff` as success. A
  *  missing git binary (ENOENT) resolves with code 127 and the error text. */
-function runGit(cwd: string, args: string[]): Promise<GitRun> {
+export function runGit(cwd: string, args: string[]): Promise<GitRun> {
   return new Promise((resolve) => {
     execFile(
       'git',
