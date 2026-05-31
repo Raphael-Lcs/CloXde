@@ -616,7 +616,15 @@ export function registerIpcHandlers(): void {
       attachments: unknown
     ): Promise<IpcResult<AssistantTurn>> => {
       if (typeof text !== 'string' || !text.trim()) return err('empty message')
-      const atts = Array.isArray(attachments) ? attachments : []
+      // Validate at the boundary: only keep well-formed image attachments so a
+      // malformed entry never reaches ACP as { data: undefined }.
+      const atts = (Array.isArray(attachments) ? attachments : []).filter(
+        (a): a is { data: string; mimeType: string } =>
+          !!a &&
+          typeof a === 'object' &&
+          typeof (a as { data?: unknown }).data === 'string' &&
+          typeof (a as { mimeType?: unknown }).mimeType === 'string'
+      )
       try {
         const turn = await getAssistantBrain().think({
           kind: 'user-message',

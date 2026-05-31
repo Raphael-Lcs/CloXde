@@ -161,10 +161,12 @@ export class AssistantBrain {
   /** Rolling tail of recent exchanges, carried across a compaction so the
    *  reseeded session still has the immediate conversational thread. */
   private transcript: { user: string; assistant: string }[] = []
-  /** Monotonic count of completed turns over the brain's whole lifetime (NOT
-   *  reset on compaction). The reflection loop snapshots this to tell whether any
-   *  conversation happened since its last pass — so it never burns a turn (and
-   *  tokens) distilling an unchanged transcript. */
+  /** Monotonic count of completed USER turns over the brain's whole lifetime
+   *  (NOT reset on compaction; background review/reflection/cron turns don't
+   *  count). The reflection loop snapshots this to tell whether the user
+   *  actually talked since its last pass — so it never burns a turn (and tokens)
+   *  distilling an unchanged conversation, and reflection turns can't
+   *  self-perpetuate. */
   private turnsTotal = 0
 
   /** True while at least one think() turn is queued or running. */
@@ -172,8 +174,8 @@ export class AssistantBrain {
     return this.inFlight > 0
   }
 
-  /** Lifetime count of completed turns — used by the reflection loop to detect
-   *  new activity since its last pass. */
+  /** Lifetime count of completed USER turns — used by the reflection loop to
+   *  detect new user activity since its last pass. */
   turnCount(): number {
     return this.turnsTotal
   }
@@ -292,8 +294,14 @@ export class AssistantBrain {
 
       await this.promptWithTimeout(rt, blocks)
       if (includeSystem) this.systemPromptSent = true
+      // Every turn (incl. background review/reflection) grows the ACP session,
+      // so all count toward compaction.
       this.turnsSinceFresh++
-      this.turnsTotal++
+      // …but only a real user exchange counts as "new conversation" — otherwise
+      // the reflection gate (turnCount delta) would be satisfied by review and
+      // reflection turns themselves, making reflection self-perpetuate every
+      // interval with no actual user activity.
+      if (signal.kind === 'user-message') this.turnsTotal++
     } catch (e) {
       actions.emitActivity({ phase: 'error', text: (e as Error).message })
       throw e
@@ -305,7 +313,11 @@ export class AssistantBrain {
     // directives have actually run, so the UI reflects the whole turn.
     const result = await this.executeDirectives(raw, signal)
     reply = result.raw
-    this.recordExchange(signal.text, reply)
+    // The transcript is the USER conversation thread carried across a
+    // compaction. Background passes (review/reflection/cron) aren't part of that
+    // dialog — recording them would reseed a compacted session with "团队最新进展…"
+    // noise instead of the actual chat.
+    if (signal.kind === 'user-message') this.recordExchange(signal.text, reply)
     actions.emitActivity({ phase: 'done' })
     return result
   }

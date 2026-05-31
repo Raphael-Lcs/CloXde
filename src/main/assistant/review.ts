@@ -36,6 +36,7 @@ const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
  *  via <<REMEMBER>>. It costs a full model turn, so it is deliberately rare AND
  *  only fires when the brain actually had new turns since the last reflection. */
 const REFLECT_INTERVAL_MS = 6 * 60 * 60 * 1000
+export const REFLECT_INTERVAL_MS_FOR_TEST = REFLECT_INTERVAL_MS
 
 /** The signal text for a reflection pass. The brain already holds its recent
  *  exchanges in-session, so we just ask it to distill them — silently. No prose
@@ -112,6 +113,23 @@ function maybePrune(): void {
   }
 }
 
+/** Pure decision for the reflection gate, extracted so it can be unit-tested
+ *  without the DB/model. Reflect only when BOTH hold: at least `intervalMs` has
+ *  elapsed since the last reflection, AND the user has had new turns since then
+ *  (currentTurns > lastReflectedTurns). The turn-delta guard is what stops a
+ *  reflection turn from re-triggering itself: reflection/review turns don't bump
+ *  the user turn count, so an idle machine never reflects twice in a row. */
+export function shouldReflect(
+  now: number,
+  lastAt: number,
+  lastTurns: number,
+  currentTurns: number,
+  intervalMs: number
+): boolean {
+  if (now - lastAt < intervalMs) return false
+  return currentTurns > lastTurns
+}
+
 /** Run the self-distillation pass at most once per REFLECT_INTERVAL_MS, and only
  *  when the brain has had new turns since the last reflection (otherwise there's
  *  nothing new to mine and we'd burn a model turn for nothing). Returns true if
@@ -120,9 +138,10 @@ function maybePrune(): void {
  *  gates already passed (it runs the model). */
 async function maybeReflect(think: ThinkFn, turnCount: TurnCountFn): Promise<boolean> {
   const now = Date.now()
-  if (now - lastReflectedAt < REFLECT_INTERVAL_MS) return false
   const turns = turnCount()
-  if (turns <= lastReflectedTurns) return false // no new conversation to distill
+  if (!shouldReflect(now, lastReflectedAt, lastReflectedTurns, turns, REFLECT_INTERVAL_MS)) {
+    return false
+  }
   lastReflectedAt = now
   lastReflectedTurns = turns
   try {
