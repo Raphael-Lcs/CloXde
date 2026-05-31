@@ -263,6 +263,8 @@ export interface AssistantTurn {
   remembered: number
   /** How many memories it retracted (now-false / superseded). */
   forgotten: number
+  /** How many memories it rewrote in place (e.g. a skill improved in use). */
+  updated: number
   /** How many self-reminders it set this turn (wake-me-later / recurring). */
   scheduled: number
   /** Messages it addressed to the user. */

@@ -694,6 +694,12 @@ export function registerIpcHandlers(): void {
               text: `撤回了 ${turn.forgotten} 条过时记忆。`
             })
           }
+          if (turn.updated > 0) {
+            assistantMessageRepo.insert({
+              role: 'system',
+              text: `改进了 ${turn.updated} 条已有记忆/技能。`
+            })
+          }
           if (turn.scheduled > 0) {
             assistantMessageRepo.insert({
               role: 'system',

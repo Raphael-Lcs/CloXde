@@ -132,7 +132,7 @@ function extractAll(text: string, tag: string): string[] {
  *  from the brain's output, leaving just the natural-language reply. */
 function stripDirectives(text: string): string {
   return text
-    .replace(/<<(DISPATCH|CONTINUE|REMEMBER|FORGET|SCHEDULE|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
+    .replace(/<<(DISPATCH|CONTINUE|REMEMBER|FORGET|UPDATE|SCHEDULE|REPORT)>>[\s\S]*?(?:<<\/\1>>|(?=<<\/?[A-Za-z])|$)/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
@@ -515,6 +515,7 @@ export class AssistantBrain {
       continued: [],
       remembered: 0,
       forgotten: 0,
+      updated: 0,
       scheduled: 0,
       reports: []
     }
@@ -533,6 +534,25 @@ export class AssistantBrain {
         result.forgotten++
       } catch (e) {
         console.error('[assistant-brain] forget failed:', (e as Error).message)
+      }
+    }
+
+    // UPDATE — rewrite an existing memory in place (by [M#] ref), re-embedding it.
+    // This is "improve a skill in use": when the brain reused a stored skill and
+    // found a better way, it refines THAT row instead of emitting a fresh
+    // <<REMEMBER>> that the dedup heuristic won't fold (an improvement is, by
+    // design, different enough from the original to dodge the near-dup guard).
+    for (const body of extractAll(raw, 'UPDATE')) {
+      const parsed = safeJson<{ ref?: string; content?: string }>(body)
+      if (!parsed?.ref || !parsed?.content) continue
+      const id = idByRef.get(`M${String(parsed.ref).replace(/\D/g, '')}`)
+      if (!id) continue
+      try {
+        actions.emitActivity({ phase: 'tool', text: '改进已有记忆' })
+        await actions.updateMemory(id, parsed.content)
+        result.updated++
+      } catch (e) {
+        console.error('[assistant-brain] update failed:', (e as Error).message)
       }
     }
 

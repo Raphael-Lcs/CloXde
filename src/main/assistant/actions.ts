@@ -163,6 +163,13 @@ export function forget(id: string): void {
   getMemoryService().forget(id)
 }
 
+/** Rewrite an existing memory's content in place, re-embedding it. The brain uses
+ *  this to improve a skill it just reused (a better way than the stored steps)
+ *  WITHOUT piling up a near-duplicate the dedup heuristic won't fold. */
+export function updateMemory(id: string, content: string): Promise<void> {
+  return getMemoryService().update(id, { content })
+}
+
 /** Set a self-reminder: a future wake-up that fires a 'cron' signal back into the
  *  brain carrying `note`. One-shot when `cron` is absent; recurring when set. The
  *  review loop scans due reminders and fires them during a quiet window. */
