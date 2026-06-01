@@ -6,6 +6,7 @@ import type {
   AssistantReport,
   MemoryKind
 } from '@shared/types'
+import { isAssistantSoundEnabled, playAssistantChime } from '../lib/sound'
 
 // The standalone assistant view: a direct chat with the user-scoped assistant
 // (the layer above the team). The user talks to it here; it decides, delegates
@@ -179,6 +180,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
         projectId: report.projectId,
         conversationId: report.conversationId
       })
+      if (isAssistantSoundEnabled()) playAssistantChime()
     })
     return off
   }, [append])
@@ -427,6 +429,7 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
       // raw only if the brain produced output but emitted no tagged reports.
       if (turn.reports.length === 0 && turn.raw) {
         append('assistant', turn.raw)
+        if (isAssistantSoundEnabled()) playAssistantChime()
       }
       for (const d of turn.dispatched) {
         append('system', `已为「${d.name}」创建项目并派出团队开始工作。`, {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { AgentKind, AgentProfile, Project } from '@shared/types'
+import { isAssistantSoundEnabled, setAssistantSoundEnabled } from '../lib/sound'
 import { TwoClickButton } from './TwoClickButton'
 
 interface SettingsDialogProps {
@@ -15,7 +16,7 @@ interface SettingsDialogProps {
   onDeleteProject: (id: string) => void
 }
 
-type SectionId = 'agent' | 'archived-projects' | 'lan' | 'about'
+type SectionId = 'agent' | 'general' | 'archived-projects' | 'lan' | 'about'
 
 interface SectionMeta {
   id: SectionId
@@ -26,6 +27,7 @@ interface SectionMeta {
 
 const SECTIONS: SectionMeta[] = [
   { id: 'agent', label: 'Agent 设置', requiresProject: true },
+  { id: 'general', label: '通用' },
   { id: 'lan', label: '平板互联' },
   { id: 'archived-projects', label: '归档项目' },
   { id: 'about', label: '关于' }
@@ -111,11 +113,42 @@ export function SettingsDialog({
                 onDelete={onDeleteProject}
               />
             )}
+            {active === 'general' && <GeneralSection />}
             {active === 'lan' && <LanSection />}
             {active === 'about' && <AboutSection />}
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+// --- General section -------------------------------------------------------
+
+function GeneralSection(): JSX.Element {
+  const [assistantSound, setAssistantSound] = useState(() => isAssistantSoundEnabled())
+
+  const toggleAssistantSound = (next: boolean): void => {
+    setAssistantSoundEnabled(next)
+    setAssistantSound(next)
+  }
+
+  return (
+    <div className="settings-pane">
+      <label className="field">
+        <span>助理消息提示音</span>
+        <label>
+          <input
+            type="checkbox"
+            checked={assistantSound}
+            onChange={(e) => toggleAssistantSound(e.target.checked)}
+          />
+          {' '}开启
+        </label>
+        <div className="settings-hint">
+          助理回复你时播放短促提示音；团队回复不受影响
+        </div>
+      </label>
     </div>
   )
 }
