@@ -57,6 +57,11 @@ export const IPC = {
   AssistantReportEvent: 'assistant:report', // main → renderer, proactive AssistantReport
   AssistantActivityEvent: 'assistant:activity', // main → renderer, live turn progress (AssistantActivity)
 
+  // WeChat channel
+  WeChatStartLogin: 'wechat:start-login',
+  WeChatGetStatus: 'wechat:get-status',
+  WeChatLogout: 'wechat:logout',
+
   // Events (main → renderer)
   ConversationUpdatedEvent: 'conversation:updated', // ConversationView snapshot
   MessageAppendedEvent: 'conversation:message-appended', // { conversationId, message }

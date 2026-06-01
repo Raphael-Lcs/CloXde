@@ -29,6 +29,11 @@ import { createSchedule, updateSchedule } from './conversation/scheduler'
 import { getAssistantBrain } from './assistant/brain'
 import { getMemoryService } from './assistant/memory'
 import { assistantBus } from './assistant/actions'
+import {
+  persistErrorMessage,
+  persistTurnOutputs,
+  persistUserMessage
+} from './assistant/turn-handler'
 import { buildInheritedSummary } from './conversation/summarizer'
 import { ensureWatch, listDir, listProjectFiles, openPath, stopWatch } from './fs/inspector'
 import { gitDiffFile, gitStatus } from './fs/git'
@@ -39,6 +44,7 @@ import {
 import { listTokens, revokeAll, revokeToken, rotatePin } from './server/auth'
 import { presence, type ActivityKind } from './server/presence'
 import { getSoulPath, ensureCloxdeDir } from './paths'
+import * as wechatChannel from './wechat/channel'
 
 function ok<T>(data: T): IpcResult<T> {
   return { ok: true, data }
@@ -650,11 +656,7 @@ export function registerIpcHandlers(): void {
       // Persist the user turn up front so it lands in the thread (and survives a
       // restart) the instant it's sent, ahead of the brain's reply. The brain's
       // own outputs are persisted below once the turn settles.
-      try {
-        assistantMessageRepo.insert({ role: 'user', text: clean })
-      } catch (e) {
-        console.error('[ipc] persist assistant user msg failed:', (e as Error).message)
-      }
+      persistUserMessage(assistantMessageRepo, clean)
       try {
         const turn = await getAssistantBrain().think({
           kind: 'user-message',
@@ -664,64 +666,14 @@ export function registerIpcHandlers(): void {
         // Persist the brain's visible outputs as the single writer. REPORTs are
         // already persisted by the assistantBus subscription (they fire mid-turn
         // through reportToUser), so we skip them here to avoid a double row.
-        try {
-          if (turn.reports.length === 0 && turn.raw) {
-            assistantMessageRepo.insert({ role: 'assistant', text: turn.raw })
-          }
-          for (const d of turn.dispatched) {
-            assistantMessageRepo.insert({
-              role: 'system',
-              text: `已为「${d.name}」创建项目并派出团队开始工作。`,
-              projectId: d.projectId,
-              conversationId: d.conversationId
-            })
-          }
-          for (const c of turn.continued) {
-            assistantMessageRepo.insert({
-              role: 'system',
-              text: `已向「${c.name}」团队追加了新指示。`,
-              projectId: c.projectId,
-              conversationId: c.conversationId
-            })
-          }
-          if (turn.remembered > 0) {
-            assistantMessageRepo.insert({
-              role: 'system',
-              text: `记下了 ${turn.remembered} 条记忆。`
-            })
-          }
-          if (turn.forgotten > 0) {
-            assistantMessageRepo.insert({
-              role: 'system',
-              text: `撤回了 ${turn.forgotten} 条过时记忆。`
-            })
-          }
-          if (turn.updated > 0) {
-            assistantMessageRepo.insert({
-              role: 'system',
-              text: `改进了 ${turn.updated} 条已有记忆/技能。`
-            })
-          }
-          if (turn.scheduled > 0) {
-            assistantMessageRepo.insert({
-              role: 'system',
-              text: `设了 ${turn.scheduled} 个提醒，到点我会自己回来处理。`
-            })
-          }
-        } catch (e) {
-          console.error('[ipc] persist assistant turn failed:', (e as Error).message)
-        }
+        persistTurnOutputs(assistantMessageRepo, turn)
         return ok(turn)
       } catch (e) {
         const msg = (e as Error).message
         // Persist the failure too. The user row was already written up front, so
         // without this a failed turn leaves a dangling question across a restart
         // (the renderer shows the error live, but it's not in the saved thread).
-        try {
-          assistantMessageRepo.insert({ role: 'system', text: `出错：${msg}` })
-        } catch (pe) {
-          console.error('[ipc] persist assistant error msg failed:', (pe as Error).message)
-        }
+        persistErrorMessage(assistantMessageRepo, msg)
         return err(`助理处理失败：${msg}`)
       }
     }
@@ -873,6 +825,45 @@ export function registerIpcHandlers(): void {
       try {
         ensureCloxdeDir()
         await writeFile(getSoulPath(), String(content ?? ''), 'utf-8')
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  // --- WeChat Channel -----------------------------------------------------
+  ipcMain.handle(
+    IPC.WeChatStartLogin,
+    async (): Promise<IpcResult<{ qrcodeUrl: string }>> => {
+      try {
+        const { qrcodeUrl, loginPromise } = await wechatChannel.startLogin()
+        loginPromise.catch((e) => {
+          console.error('[ipc] wechat login failed:', e)
+        })
+        return ok({ qrcodeUrl })
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.WeChatGetStatus,
+    (): IpcResult<{ loggedIn: boolean; accountId: string | null }> => {
+      try {
+        return ok(wechatChannel.getStatus())
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.WeChatLogout,
+    (): IpcResult<true> => {
+      try {
+        wechatChannel.logout()
         return ok(true)
       } catch (e) {
         return err((e as Error).message)

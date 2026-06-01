@@ -127,6 +127,11 @@ interface CloXdeApi {
     onReport: (cb: (report: AssistantReport) => void) => Unsubscribe
     onActivity: (cb: (activity: AssistantActivity) => void) => Unsubscribe
   }
+  wechat: {
+    startLogin: () => Promise<IpcResult<{ qrcodeUrl: string }>>
+    getStatus: () => Promise<IpcResult<{ loggedIn: boolean; accountId: string | null }>>
+    logout: () => Promise<IpcResult<true>>
+  }
   schedules: {
     listByConversation: (conversationId: string) => Promise<IpcResult<Schedule[]>>
     create: (input: {
