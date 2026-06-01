@@ -170,6 +170,7 @@ function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | 
   const sections: string[] = []
   let newestTs = 0
   let stuck = false
+  let hasSettled = false // at least one team is ended or awaiting-user
   for (const project of ownedProjects()) {
     const convs = conversationRepo.listByProject(project.id)
     if (convs.length === 0) continue
@@ -180,6 +181,11 @@ function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | 
     if (convNewest > newestTs) newestTs = convNewest
     const needsAttention = conv.autopilot && conv.status === 'awaiting-user'
     if (needsAttention) stuck = true
+    // A team that just settled (ended or awaiting-user) is "new activity" even if
+    // its last message ts hasn't changed — the state transition itself is worth
+    // reviewing. This fixes the bug where a team finishes but the assistant never
+    // reports because no new message was appended.
+    if (conv.status === 'ended' || conv.status === 'awaiting-user') hasSettled = true
     const lines = msgs
       .map((m) => {
         const t = renderMessageText(m)
@@ -192,7 +198,11 @@ function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | 
       `# 项目「${project.name}」(状态 ${conv.status}, 会话ID ${conv.id})${flag}\n${lines || '  （无文本消息）'}`
     )
   }
-  if (sections.length === 0 || newestTs <= lastReviewedTs) return null
+  // Return null only if there's truly nothing: no teams at all, OR all teams are
+  // still 'thinking' AND their messages are stale. A settled team (ended /
+  // awaiting-user) always triggers a review, even if its last message is old.
+  if (sections.length === 0) return null
+  if (!hasSettled && newestTs <= lastReviewedTs) return null
   return { text: sections.join('\n\n'), newestTs, stuck }
 }
 
