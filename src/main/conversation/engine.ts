@@ -1477,6 +1477,7 @@ export class ConversationEngine extends EventEmitter {
    *  per-session and behave badly under concurrent dispatch). */
   private async cancelTeamRuntimes(slot: ActiveConversation): Promise<void> {
     const cancels: Promise<void>[] = []
+    const drains: Promise<void>[] = []
     for (const teamSide of [slot.architect, slot.executor]) {
       if (teamSide.streamingMessageId) {
         cancels.push(teamSide.runtime.cancel().catch(() => undefined))
@@ -1487,12 +1488,18 @@ export class ConversationEngine extends EventEmitter {
         teamSide.streamingMessage = null
         teamSide.toolBlockIndex.clear()
       }
+      // Drain the queue: save current inFlight, immediately set to resolved
+      // to block new tasks, then wait for the old queue to finish.
+      const oldQueue = teamSide.inFlight
       teamSide.inFlight = Promise.resolve()
+      drains.push(oldQueue.catch(() => undefined))
     }
-    if (cancels.length > 0) {
-      // Cap the wait — Hermes adapters occasionally never ack cancel.
+    const allWaits = [...cancels, ...drains]
+    if (allWaits.length > 0) {
+      // Cap the wait — Hermes adapters occasionally never ack cancel,
+      // and queued tasks may be slow.
       await Promise.race([
-        Promise.all(cancels).then(() => undefined),
+        Promise.all(allWaits).then(() => undefined),
         new Promise<void>((resolve) => setTimeout(resolve, 1500))
       ])
     }
