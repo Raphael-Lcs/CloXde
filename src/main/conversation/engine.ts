@@ -294,6 +294,9 @@ export class ConversationEngine extends EventEmitter {
         }
         const s = this.active.get(conv.id)
         if (!s) return
+        // Refresh slot.conversation after session ID update
+        const fresh = conversationRepo.get(conv.id)
+        if (fresh) s.conversation = fresh
         if (restored) {
           // Agent re-loaded its own context, including any previously sent
           // system prompt — skip re-injection.
@@ -314,6 +317,9 @@ export class ConversationEngine extends EventEmitter {
         }
         const s = this.active.get(conv.id)
         if (!s) return
+        // Refresh slot.conversation after session ID update
+        const fresh = conversationRepo.get(conv.id)
+        if (fresh) s.conversation = fresh
         if (restored) {
           s.executor.systemPromptSent = true
           this.recordSystemMessage(s, '执行者上下文已从历史会话恢复。')
@@ -337,6 +343,9 @@ export class ConversationEngine extends EventEmitter {
           }
           const s = this.active.get(conv.id)
           if (!s || !s.pm) return
+          // Refresh slot.conversation after session ID update
+          const fresh = conversationRepo.get(conv.id)
+          if (fresh) s.conversation = fresh
           if (restored) {
             s.pm.systemPromptSent = true
             this.recordSystemMessage(s, '产品经理上下文已从历史会话恢复。')
