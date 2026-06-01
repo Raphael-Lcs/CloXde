@@ -41,9 +41,9 @@ if exist "%WATCHDOG_STATE%" (
 )
 if "%LAST_GOOD_COMMIT%"=="" (
     REM First boot or state lost → snapshot current HEAD as the baseline.
-    for /f "usebackq tokens=*" %%a in (`git rev-parse HEAD 2^>nul`) do set "LAST_GOOD_COMMIT=%%a"
+    for /f "usebackq tokens=*" %%a in (`git rev-parse HEAD 2^>^&1`) do set "LAST_GOOD_COMMIT=%%a"
     if not "!LAST_GOOD_COMMIT!"=="" (
-        echo !LAST_GOOD_COMMIT!> "%WATCHDOG_STATE%"
+        echo !LAST_GOOD_COMMIT! > "%WATCHDOG_STATE%"
     )
 )
 
@@ -51,16 +51,16 @@ REM Crash history: timestamps of recent nonzero exits (epoch seconds). We keep
 REM a rolling window and count how many fall within CRASH_WINDOW_SEC of now.
 set "CRASH_TIMES="
 
-echo [%date% %time%] CloXde watchdog starting. last-good=%LAST_GOOD_COMMIT%> "%LOG_FILE%"
+echo [%date% %time%] CloXde watchdog starting. last-good=%LAST_GOOD_COMMIT% > "%LOG_FILE%"
 
 if not exist "%~dp0node_modules\.bin\electron-vite.cmd" (
-    echo [CloXde] node_modules not found. Run "pnpm install" once first.>> "%LOG_FILE%"
+    echo [CloXde] node_modules not found. Run "pnpm install" once first. >> "%LOG_FILE%"
     exit /b 1
 )
 
 :LOOP
-    echo.>> "%LOG_FILE%"
-    echo [%date% %time%] --- Starting app --->> "%LOG_FILE%"
+    echo. >> "%LOG_FILE%"
+    echo [%date% %time%] --- Starting app --- >> "%LOG_FILE%"
     set START_TIME=%TIME%
 
     REM Run the app. Redirect its output to the log; capture its exit code.
@@ -77,19 +77,19 @@ if not exist "%~dp0node_modules\.bin\electron-vite.cmd" (
     set /a UPTIME_SEC=!END_SEC! - !START_SEC!
     if !UPTIME_SEC! lss 0 set /a UPTIME_SEC=!UPTIME_SEC! + 86400
 
-    echo [%date% %time%] App exited: code=!EXIT_CODE!, uptime=!UPTIME_SEC!s>> "%LOG_FILE%"
+    echo [%date% %time%] App exited: code=!EXIT_CODE!, uptime=!UPTIME_SEC!s >> "%LOG_FILE%"
 
     REM Exit code 0 = clean shutdown. If uptime was long enough, promote current
     REM HEAD to last-good (the app is stable). Then stop the loop (user quit).
     if !EXIT_CODE! equ 0 (
         if !UPTIME_SEC! geq %STABLE_UPTIME_SEC% (
-            for /f "usebackq tokens=*" %%a in (`git rev-parse HEAD 2^>nul`) do (
+            for /f "usebackq tokens=*" %%a in (`git rev-parse HEAD 2^>^&1`) do (
                 set "LAST_GOOD_COMMIT=%%a"
-                echo !LAST_GOOD_COMMIT!> "%WATCHDOG_STATE%"
-                echo [%date% %time%] Stable run; last-good updated to !LAST_GOOD_COMMIT!>> "%LOG_FILE%"
+                echo !LAST_GOOD_COMMIT! > "%WATCHDOG_STATE%"
+                echo [%date% %time%] Stable run; last-good updated to !LAST_GOOD_COMMIT! >> "%LOG_FILE%"
             )
         )
-        echo [%date% %time%] Clean exit; stopping watchdog.>> "%LOG_FILE%"
+        echo [%date% %time%] Clean exit; stopping watchdog. >> "%LOG_FILE%"
         goto :EOF
     )
 
@@ -97,7 +97,7 @@ if not exist "%~dp0node_modules\.bin\electron-vite.cmd" (
     REM as a crash. The new code is now at HEAD; we do NOT update last-good yet
     REM (it must prove stable first).
     if !EXIT_CODE! equ 42 (
-        echo [%date% %time%] Self-mod promotion; restarting onto new code.>> "%LOG_FILE%"
+        echo [%date% %time%] Self-mod promotion; restarting onto new code. >> "%LOG_FILE%"
         goto :LOOP
     )
 
@@ -118,27 +118,27 @@ if not exist "%~dp0node_modules\.bin\electron-vite.cmd" (
     set CRASH_COUNT=0
     for %%t in (!CRASH_TIMES!) do set /a CRASH_COUNT+=1
 
-    echo [%date% %time%] Crash count in last %CRASH_WINDOW_SEC%s: !CRASH_COUNT!>> "%LOG_FILE%"
+    echo [%date% %time%] Crash count in last %CRASH_WINDOW_SEC%s: !CRASH_COUNT! >> "%LOG_FILE%"
 
     if !CRASH_COUNT! geq %CRASH_THRESHOLD% (
-        echo [%date% %time%] Crash-loop detected.>> "%LOG_FILE%"
+        echo [%date% %time%] Crash-loop detected. >> "%LOG_FILE%"
         REM Conservative rollback: only if HEAD is a self-mod promoted commit.
         call :CHECK_SELFMOD_HEAD IS_SELFMOD
         if "!IS_SELFMOD!"=="1" (
             if not "!LAST_GOOD_COMMIT!"=="" (
-                echo [%date% %time%] HEAD is self-mod commit; rolling back to !LAST_GOOD_COMMIT!>> "%LOG_FILE%"
-                git reset --hard !LAST_GOOD_COMMIT!>> "%LOG_FILE%" 2>&1
+                echo [%date% %time%] HEAD is self-mod commit; rolling back to !LAST_GOOD_COMMIT! >> "%LOG_FILE%"
+                git reset --hard !LAST_GOOD_COMMIT! >> "%LOG_FILE%" 2>&1
                 REM Record the rollback in the audit log (best-effort).
-                powershell -NoProfile -Command "$ts = (Get-Date).ToUniversalTime().ToString('o'); $entry = @{ts=$ts; phase='rolled-back'; runId='watchdog'; detail='crash-loop detected; rolled back to '+$env:LAST_GOOD_COMMIT} | ConvertTo-Json -Compress; Add-Content -Path \"$env:USERPROFILE\.cloxde\selfmod-audit.jsonl\" -Value $entry">> "%LOG_FILE%" 2>&1
+                powershell -NoProfile -Command "$ts = (Get-Date).ToUniversalTime().ToString('o'); $entry = @{ts=$ts; phase='rolled-back'; runId='watchdog'; detail='crash-loop detected; rolled back to '+$env:LAST_GOOD_COMMIT} | ConvertTo-Json -Compress; Add-Content -Path \"$env:USERPROFILE\.cloxde\selfmod-audit.jsonl\" -Value $entry" >> "%LOG_FILE%" 2>&1
                 REM Clear crash history and restart.
                 set "CRASH_TIMES="
                 goto :LOOP
             ) else (
-                echo [%date% %time%] No last-good commit recorded; cannot roll back. Stopping.>> "%LOG_FILE%"
+                echo [%date% %time%] No last-good commit recorded; cannot roll back. Stopping. >> "%LOG_FILE%"
                 goto :EOF
             )
         ) else (
-            echo [%date% %time%] HEAD is not a self-mod commit; refusing to roll back user changes. Stopping.>> "%LOG_FILE%"
+            echo [%date% %time%] HEAD is not a self-mod commit; refusing to roll back user changes. Stopping. >> "%LOG_FILE%"
             goto :EOF
         )
     )
@@ -165,7 +165,7 @@ REM the audit log. Sets the output var to "1" if HEAD matches a 'promoted'
 REM resultCommit, else "0".
 :CHECK_SELFMOD_HEAD
     set "%~1=0"
-    for /f "usebackq tokens=*" %%a in (`git rev-parse HEAD 2^>nul`) do set "CURRENT_HEAD=%%a"
+    for /f "usebackq tokens=*" %%a in (`git rev-parse HEAD 2^>^&1`) do set "CURRENT_HEAD=%%a"
     if "!CURRENT_HEAD!"=="" goto :EOF
     set AUDIT_PATH=%USERPROFILE%\.cloxde\selfmod-audit.jsonl
     if not exist "!AUDIT_PATH!" goto :EOF
