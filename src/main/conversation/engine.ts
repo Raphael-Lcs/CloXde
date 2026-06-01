@@ -540,6 +540,15 @@ export class ConversationEngine extends EventEmitter {
   async dispose(conversationId: string): Promise<void> {
     const slot = this.active.get(conversationId)
     if (!slot) return
+    // First, drain all inFlight queues to avoid orphaned tasks.
+    const drains = this.allSides(slot).map((sr) => sr.inFlight.catch(() => undefined))
+    if (drains.length > 0) {
+      // Cap the wait — queued tasks may be slow or stuck.
+      await Promise.race([
+        Promise.all(drains).then(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, 3000))
+      ])
+    }
     // Tear down every side even if one throws — a rejected dispose() must not
     // leave the other runtimes' child processes alive, nor skip the `active`
     // cleanup below (which would strand the conversation as "active" forever).
