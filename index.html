@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CloXde - AI 协作管家</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: "#0a0a0a",
+            panel: "#12131a",
+            line: "rgba(255,255,255,0.10)"
+          },
+          fontFamily: {
+            sans: ["Inter", "ui-sans-serif", "system-ui", "Segoe UI", "Microsoft YaHei", "sans-serif"]
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0a0a;
+      --panel: rgba(18, 19, 26, 0.76);
+      --line: rgba(255, 255, 255, 0.1);
+      --text: #f7f7fb;
+      --muted: #a7adbd;
+      --blue: #38bdf8;
+      --violet: #8b5cf6;
+      --pink: #f472b6;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 50% -20%, rgba(56, 189, 248, 0.16), transparent 34rem),
+        linear-gradient(180deg, #0a0a0a 0%, #0b0b11 46%, #0a0a0a 100%);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+
+    .site-shell {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .site-shell::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+      background-size: 56px 56px;
+      mask-image: linear-gradient(to bottom, black 0%, transparent 74%);
+    }
+
+    .gradient-text {
+      background: linear-gradient(90deg, var(--blue), var(--violet), var(--pink));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    .glass-card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.055), rgba(255,255,255,0.025));
+      border: 1px solid var(--line);
+      box-shadow: 0 18px 52px rgba(0, 0, 0, 0.28);
+      backdrop-filter: blur(16px);
+    }
+
+    .ability-card {
+      min-height: 190px;
+      transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+    }
+
+    .ability-card:hover {
+      transform: translateY(-6px);
+      border-color: rgba(139, 92, 246, 0.5);
+      background: linear-gradient(180deg, rgba(139, 92, 246, 0.12), rgba(255,255,255,0.035));
+    }
+
+    .console-line {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      padding: 0.72rem 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      color: #d7dcff;
+      font-size: 0.94rem;
+    }
+
+    .console-line:last-child {
+      border-bottom: 0;
+    }
+
+    .flow-card {
+      min-height: 148px;
+    }
+
+    .fade-in {
+      opacity: 0;
+      transform: translateY(18px);
+      transition: opacity 600ms ease, transform 600ms ease;
+    }
+
+    .fade-in.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      .fade-in,
+      .ability-card {
+        opacity: 1;
+        transform: none;
+        transition: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="site-shell min-h-screen bg-ink" style="overflow: visible;">
+    <nav class="sticky top-0 z-40 border-b border-white/10 bg-ink/70 backdrop-blur-xl">
+      <div class="mx-auto flex min-h-16 w-full max-w-7xl items-center justify-between gap-3 px-5 sm:px-8 lg:px-10">
+        <a href="#" class="gradient-text shrink-0 text-2xl font-semibold tracking-normal">
+          CloXde
+        </a>
+        <div class="hidden items-center gap-6 text-sm font-medium text-slate-300 md:flex">
+          <a href="#capabilities" class="transition hover:text-white">核心能力</a>
+          <a href="#quickstart" class="transition hover:text-white">快速开始</a>
+          <a href="#community" class="transition hover:text-white">社区</a>
+        </div>
+        <div class="hidden items-center gap-3 md:flex">
+          <a href="https://github.com/Raphael-Lcs/CloXde" target="_blank" rel="noopener" class="glass-card inline-flex min-h-10 items-center justify-center rounded-lg border border-white/12 px-4 py-2 text-sm font-semibold text-white transition hover:scale-[1.02] hover:border-sky-400/60">
+            ⭐ Star
+          </a>
+          <a href="https://github.com/Raphael-Lcs/CloXde" target="_blank" rel="noopener" class="glass-card inline-flex min-h-10 items-center justify-center rounded-lg border border-white/12 px-4 py-2 text-sm font-semibold text-white transition hover:scale-[1.02] hover:border-violet-400/60">
+            🍴 Fork
+          </a>
+        </div>
+        <a href="https://github.com/Raphael-Lcs/CloXde" target="_blank" rel="noopener" class="glass-card inline-flex min-h-10 shrink-0 items-center justify-center rounded-lg border border-white/12 px-4 py-2 text-sm font-semibold text-white transition hover:border-sky-400/60 md:hidden">
+          GitHub
+        </a>
+      </div>
+    </nav>
+
+    <section class="relative mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-7xl flex-col justify-center px-5 py-16 sm:px-8 sm:py-20 lg:px-10">
+      <div class="grid items-center gap-12 lg:grid-cols-[1.05fr_0.95fr]">
+        <div class="fade-in text-center lg:text-left">
+          <p class="mb-5 inline-flex items-center rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-slate-300">
+            AI 协作管家 / 智能助理
+          </p>
+          <h1 class="gradient-text text-6xl font-semibold leading-none tracking-normal sm:text-7xl lg:text-8xl">
+            CloXde
+          </h1>
+          <h2 class="mt-6 text-2xl font-medium text-white sm:text-4xl">
+            AI 协作管家
+          </h2>
+          <p class="mx-auto mt-6 max-w-2xl text-base leading-8 text-slate-300 sm:text-lg lg:mx-0">
+            读写文件、运行命令、派团队协作、沉淀长期记忆，把复杂需求拆成可执行的步骤并交付结果。
+          </p>
+          <div class="mt-8">
+            <p class="mb-4 text-sm font-medium text-slate-400">下载客户端</p>
+            <div class="flex flex-wrap items-center justify-center gap-3 lg:justify-start">
+              <a href="https://github.com/Raphael-Lcs/CloXde/releases" target="_blank" rel="noopener" class="download-btn glass-card inline-flex min-h-11 items-center gap-2 rounded-lg border border-white/12 px-5 py-2.5 text-sm font-semibold text-white transition hover:scale-[1.02] hover:border-sky-400/60">
+                <span>🪟</span>
+                <span>Windows</span>
+              </a>
+              <a href="https://github.com/Raphael-Lcs/CloXde/releases" target="_blank" rel="noopener" class="download-btn glass-card inline-flex min-h-11 items-center gap-2 rounded-lg border border-white/12 px-5 py-2.5 text-sm font-semibold text-white transition hover:scale-[1.02] hover:border-violet-400/60">
+                <span>🍎</span>
+                <span>macOS</span>
+              </a>
+              <a href="https://github.com/Raphael-Lcs/CloXde/releases" target="_blank" rel="noopener" class="download-btn glass-card inline-flex min-h-11 items-center gap-2 rounded-lg border border-white/12 px-5 py-2.5 text-sm font-semibold text-white transition hover:scale-[1.02] hover:border-fuchsia-400/60">
+                <span>🐧</span>
+                <span>Linux</span>
+              </a>
+            </div>
+          </div>
+          <div class="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row lg:justify-start">
+            <a href="#cta" class="inline-flex min-h-12 items-center justify-center rounded-lg bg-gradient-to-r from-sky-400 via-violet-500 to-fuchsia-400 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-950/40 transition hover:scale-[1.02]">
+              开始使用 CloXde
+            </a>
+            <a href="#capabilities" class="inline-flex min-h-12 items-center justify-center rounded-lg border border-white/12 bg-white/[0.04] px-6 py-3 text-sm font-semibold text-slate-100 transition hover:border-sky-300/60 hover:bg-white/[0.08]">
+              查看核心能力
+            </a>
+          </div>
+        </div>
+
+        <div class="fade-in glass-card rounded-2xl p-5 sm:p-6">
+          <div class="mb-5 flex items-center justify-between border-b border-white/10 pb-4">
+            <div class="flex items-center gap-2">
+              <span class="h-3 w-3 rounded-full bg-rose-400"></span>
+              <span class="h-3 w-3 rounded-full bg-amber-300"></span>
+              <span class="h-3 w-3 rounded-full bg-emerald-400"></span>
+            </div>
+            <span class="text-xs uppercase tracking-[0.22em] text-slate-500">workspace</span>
+          </div>
+          <div class="rounded-xl border border-white/10 bg-black/35 p-4">
+            <div class="console-line">
+              <span class="text-sky-300">01</span>
+              <span>读取项目文件，理解代码结构与上下文</span>
+            </div>
+            <div class="console-line">
+              <span class="text-violet-300">02</span>
+              <span>规划任务路径，必要时派出子团队并行处理</span>
+            </div>
+            <div class="console-line">
+              <span class="text-fuchsia-300">03</span>
+              <span>执行命令、修复问题、验证真实结果</span>
+            </div>
+            <div class="console-line">
+              <span class="text-emerald-300">04</span>
+              <span>把结论和关键上下文沉淀为长期记忆</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="capabilities" class="relative mx-auto w-full max-w-7xl px-5 py-20 sm:px-8 lg:px-10">
+      <div class="fade-in mx-auto max-w-3xl text-center">
+        <p class="text-sm font-semibold uppercase tracking-[0.24em] text-sky-300">Core Capabilities</p>
+        <h2 class="mt-4 text-3xl font-semibold text-white sm:text-5xl">核心能力</h2>
+        <p class="mt-5 text-base leading-7 text-slate-400">
+          从理解需求到完成交付，CloXde 把协作链路中的关键动作集中在一个清晰的工作台里。
+        </p>
+      </div>
+
+      <div class="mt-12 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        <article class="fade-in ability-card glass-card rounded-xl p-6">
+          <div class="text-3xl" aria-hidden="true">📁</div>
+          <h3 class="mt-5 text-xl font-semibold text-white">文件操作</h3>
+          <p class="mt-3 leading-7 text-slate-400">读写代码、配置文件与文档，按项目结构做精准修改。</p>
+        </article>
+        <article class="fade-in ability-card glass-card rounded-xl p-6">
+          <div class="text-3xl" aria-hidden="true">⌘</div>
+          <h3 class="mt-5 text-xl font-semibold text-white">命令执行</h3>
+          <p class="mt-3 leading-7 text-slate-400">运行 shell、构建、测试和诊断命令，用结果验证交付质量。</p>
+        </article>
+        <article class="fade-in ability-card glass-card rounded-xl p-6">
+          <div class="text-3xl" aria-hidden="true">🤝</div>
+          <h3 class="mt-5 text-xl font-semibold text-white">团队协作</h3>
+          <p class="mt-3 leading-7 text-slate-400">PM、架构师、执行者分工协作，把任务拆解到合适角色。</p>
+        </article>
+        <article class="fade-in ability-card glass-card rounded-xl p-6">
+          <div class="text-3xl" aria-hidden="true">🧠</div>
+          <h3 class="mt-5 text-xl font-semibold text-white">长期记忆</h3>
+          <p class="mt-3 leading-7 text-slate-400">跨会话记住项目背景、偏好和历史决策，减少重复解释。</p>
+        </article>
+        <article class="fade-in ability-card glass-card rounded-xl p-6">
+          <div class="text-3xl" aria-hidden="true">💬</div>
+          <h3 class="mt-5 text-xl font-semibold text-white">多轮对话</h3>
+          <p class="mt-3 leading-7 text-slate-400">理解意图、澄清需求、跟进上下文，持续推进复杂任务。</p>
+        </article>
+        <article class="fade-in ability-card glass-card rounded-xl p-6">
+          <div class="text-3xl" aria-hidden="true">🧭</div>
+          <h3 class="mt-5 text-xl font-semibold text-white">智能规划</h3>
+          <p class="mt-3 leading-7 text-slate-400">分析目标和约束，制定方案，按风险和优先级推进落地。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="relative mx-auto w-full max-w-7xl px-5 py-20 sm:px-8 lg:px-10">
+      <div class="fade-in mx-auto max-w-3xl text-center">
+        <p class="text-sm font-semibold uppercase tracking-[0.24em] text-violet-300">Workflow</p>
+        <h2 class="mt-4 text-3xl font-semibold text-white sm:text-5xl">典型工作流程</h2>
+      </div>
+
+      <div class="mt-12 grid items-stretch gap-4 md:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr]">
+        <div class="fade-in flow-card glass-card rounded-xl p-5 text-center">
+          <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-sky-400/15 text-xl">1</div>
+          <h3 class="mt-4 font-semibold text-white">用户提需求</h3>
+          <p class="mt-2 text-sm leading-6 text-slate-400">描述目标、约束和期望交付物。</p>
+        </div>
+        <div class="hidden items-center text-2xl text-slate-500 md:flex">→</div>
+        <div class="fade-in flow-card glass-card rounded-xl p-5 text-center">
+          <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-violet-400/15 text-xl">2</div>
+          <h3 class="mt-4 font-semibold text-white">PM 澄清</h3>
+          <p class="mt-2 text-sm leading-6 text-slate-400">补齐信息，确认边界和优先级。</p>
+        </div>
+        <div class="hidden items-center text-2xl text-slate-500 md:flex">→</div>
+        <div class="fade-in flow-card glass-card rounded-xl p-5 text-center">
+          <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-fuchsia-400/15 text-xl">3</div>
+          <h3 class="mt-4 font-semibold text-white">团队协作</h3>
+          <p class="mt-2 text-sm leading-6 text-slate-400">架构师设计，执行者落地，必要时并行分工。</p>
+        </div>
+        <div class="hidden items-center text-2xl text-slate-500 md:flex">→</div>
+        <div class="fade-in flow-card glass-card rounded-xl p-5 text-center">
+          <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-emerald-400/15 text-xl">4</div>
+          <h3 class="mt-4 font-semibold text-white">完成交付</h3>
+          <p class="mt-2 text-sm leading-6 text-slate-400">输出结果、验证记录和后续建议。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="quickstart" class="relative mx-auto w-full max-w-7xl px-5 py-20 sm:px-8 lg:px-10">
+      <div class="fade-in mx-auto max-w-3xl text-center">
+        <p class="text-sm font-semibold uppercase tracking-[0.24em] text-sky-300">Quick Start</p>
+        <h2 class="mt-4 text-3xl font-semibold text-white sm:text-5xl">快速开始</h2>
+        <p class="mt-5 text-base leading-7 text-slate-400">
+          安装命令、下载入口与文档都集中在这里，适合快速把 CloXde 接入你的协作流程。
+        </p>
+      </div>
+
+      <div class="fade-in glass-card mx-auto mt-12 max-w-4xl rounded-2xl p-5 sm:p-6">
+        <div class="mb-5 flex items-center justify-between border-b border-white/10 pb-4">
+          <div class="flex items-center gap-2">
+            <span class="h-3 w-3 rounded-full bg-rose-400"></span>
+            <span class="h-3 w-3 rounded-full bg-amber-300"></span>
+            <span class="h-3 w-3 rounded-full bg-emerald-400"></span>
+          </div>
+          <span class="text-xs uppercase tracking-[0.22em] text-slate-500">terminal</span>
+        </div>
+        <div class="rounded-xl border border-white/10 bg-black/35 p-4 sm:p-5">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <code class="break-all font-mono text-base text-sky-200 sm:text-lg">
+              git clone https://github.com/Raphael-Lcs/CloXde<br>
+              cd CloXde<br>
+              pnpm install<br>
+              pnpm dev
+            </code>
+            <button type="button" data-copy-text="git clone https://github.com/Raphael-Lcs/CloXde
+cd CloXde
+pnpm install
+pnpm dev" class="copy-btn inline-flex min-h-10 shrink-0 items-center justify-center rounded-lg border border-white/12 bg-white/[0.04] px-4 py-2 text-sm font-semibold text-white transition hover:border-sky-300/60 hover:bg-white/[0.08]">
+              复制
+            </button>
+          </div>
+          <div class="mt-5 space-y-2 text-sm leading-6 text-slate-400">
+            <p>1. 从 Releases 下载客户端，或从源码运行（git clone + pnpm install && pnpm dev）。</p>
+            <p>2. 在项目目录中启动协作环境，让 AI 团队读取上下文并执行任务。</p>
+            <p>3. 按需提交 Issue、PR 或查阅 README 获取更多使用细节。</p>
+          </div>
+        </div>
+        <div class="mt-6 flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-center">
+          <a href="https://github.com/Raphael-Lcs/CloXde/releases" target="_blank" rel="noopener" class="inline-flex min-h-12 items-center justify-center rounded-lg bg-gradient-to-r from-sky-400 via-violet-500 to-fuchsia-400 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-950/40 transition hover:scale-[1.02]">
+            下载客户端
+          </a>
+          <a href="https://github.com/Raphael-Lcs/CloXde#readme" target="_blank" rel="noopener" class="inline-flex min-h-12 items-center justify-center rounded-lg border border-white/12 bg-white/[0.04] px-6 py-3 text-sm font-semibold text-slate-100 transition hover:border-sky-300/60 hover:bg-white/[0.08]">
+            查看文档
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <section id="community" class="relative mx-auto w-full max-w-7xl px-5 py-20 sm:px-8 lg:px-10">
+      <div class="fade-in mx-auto max-w-3xl text-center">
+        <p class="text-sm font-semibold uppercase tracking-[0.24em] text-fuchsia-300">Community</p>
+        <h2 class="mt-4 text-3xl font-semibold text-white sm:text-5xl">社区与贡献</h2>
+        <p class="mt-5 text-base leading-7 text-slate-400">
+          CloXde 欢迎真实使用反馈、问题复现和功能贡献。你可以从 Issue、Pull Request 或 README 开始参与。
+        </p>
+      </div>
+
+      <div class="mt-12 grid gap-5 md:grid-cols-3">
+        <a href="https://github.com/Raphael-Lcs/CloXde/issues" target="_blank" rel="noopener" class="fade-in ability-card glass-card block rounded-xl p-6">
+          <div class="text-3xl" aria-hidden="true">💡</div>
+          <h3 class="mt-5 text-xl font-semibold text-white">提 Issue</h3>
+          <p class="mt-3 leading-7 text-slate-400">提交 Bug、需求建议和复现路径，帮助项目持续改进。</p>
+        </a>
+        <a href="https://github.com/Raphael-Lcs/CloXde/pulls" target="_blank" rel="noopener" class="fade-in ability-card glass-card block rounded-xl p-6">
+          <div class="text-3xl" aria-hidden="true">🔧</div>
+          <h3 class="mt-5 text-xl font-semibold text-white">提 PR</h3>
+          <p class="mt-3 leading-7 text-slate-400">贡献代码、文档或体验优化，用可审查的改动推进项目。</p>
+        </a>
+        <a href="https://github.com/Raphael-Lcs/CloXde#readme" target="_blank" rel="noopener" class="fade-in ability-card glass-card block rounded-xl p-6">
+          <div class="text-3xl" aria-hidden="true">📘</div>
+          <h3 class="mt-5 text-xl font-semibold text-white">读文档</h3>
+          <p class="mt-3 leading-7 text-slate-400">通过 README 了解安装方式、使用边界和后续路线。</p>
+        </a>
+      </div>
+    </section>
+
+    <section id="cta" class="relative mx-auto w-full max-w-7xl px-5 pb-24 pt-16 sm:px-8 lg:px-10">
+      <div class="fade-in overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-r from-sky-500/12 via-violet-500/14 to-fuchsia-500/12 p-8 text-center sm:p-12">
+        <h2 class="text-3xl font-semibold text-white sm:text-5xl">开始使用 CloXde</h2>
+        <p class="mx-auto mt-5 max-w-2xl text-base leading-7 text-slate-300">
+          把你的想法交给协作环境，让 AI 团队帮你拆解、执行、验证并持续记住关键上下文。
+        </p>
+        <a href="#quickstart" class="mt-8 inline-flex min-h-12 items-center justify-center rounded-lg bg-white px-7 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-sky-100">
+          立即开始
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="fade-in border-t border-white/10 bg-ink/70 px-5 py-8 backdrop-blur-xl sm:px-8 lg:px-10">
+    <div class="mx-auto flex w-full max-w-7xl flex-col gap-4 text-sm text-slate-400 sm:flex-row sm:items-center sm:justify-between">
+      <p>© 2026 CloXde</p>
+      <div class="flex flex-wrap items-center gap-4">
+        <a href="https://github.com/Raphael-Lcs/CloXde" target="_blank" rel="noopener" class="transition hover:text-white">GitHub 仓库</a>
+        <a href="https://github.com/Raphael-Lcs/CloXde#readme" target="_blank" rel="noopener" class="transition hover:text-white">文档</a>
+        <a href="https://github.com/Raphael-Lcs/CloXde/releases" target="_blank" rel="noopener" class="transition hover:text-white">Releases</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const copyText = async (text) => {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    };
+
+    document.querySelectorAll(".copy-btn").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const text = button.dataset.copyText || "";
+        const originalText = button.textContent;
+        try {
+          await copyText(text);
+          button.textContent = "已复制";
+          setTimeout(() => {
+            button.textContent = originalText;
+          }, 1500);
+        } catch (error) {
+          button.textContent = "复制失败";
+          setTimeout(() => {
+            button.textContent = originalText;
+          }, 1500);
+        }
+      });
+    });
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("visible");
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.14 });
+
+    document.querySelectorAll(".fade-in").forEach((element) => observer.observe(element));
+  </script>
+</body>
+</html>
