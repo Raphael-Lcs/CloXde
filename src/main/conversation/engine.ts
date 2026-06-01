@@ -127,6 +127,9 @@ interface SideRuntime {
    *  turn; concurrent prompts across sides run in parallel. This is what
    *  lets the user chat with PM while the team is still grinding. */
   inFlight: Promise<void>
+  /** Queue for serializing handleUpdate operations. Prevents concurrent
+   *  updates from racing when multiple ACP notifications arrive rapidly. */
+  updateInFlight: Promise<void>
 }
 
 interface ActiveConversation {
@@ -352,7 +355,8 @@ export class ConversationEngine extends EventEmitter {
             streamingMessageId: null,
             streamingMessage: null,
             systemPromptSent: false,
-            inFlight: Promise.resolve()
+            inFlight: Promise.resolve(),
+            updateInFlight: Promise.resolve()
           }
         : null,
       architect: {
@@ -362,7 +366,8 @@ export class ConversationEngine extends EventEmitter {
         streamingMessageId: null,
         streamingMessage: null,
         systemPromptSent: false,
-        inFlight: Promise.resolve()
+        inFlight: Promise.resolve(),
+        updateInFlight: Promise.resolve()
       },
       executor: {
         side: 'executor',
@@ -371,7 +376,8 @@ export class ConversationEngine extends EventEmitter {
         streamingMessageId: null,
         streamingMessage: null,
         systemPromptSent: false,
-        inFlight: Promise.resolve()
+        inFlight: Promise.resolve(),
+        updateInFlight: Promise.resolve()
       },
       stallNudges: 0,
       pmReportRetried: false
@@ -636,7 +642,11 @@ export class ConversationEngine extends EventEmitter {
 
   private wireSide(slot: ActiveConversation, sr: SideRuntime): void {
     sr.runtime.on('update', (notification: SessionNotification) => {
-      this.handleUpdate(slot, sr, notification)
+      sr.updateInFlight = sr.updateInFlight.then(() => {
+        this.handleUpdate(slot, sr, notification)
+      }).catch((err: unknown) => {
+        console.error('[engine] handleUpdate error:', err)
+      })
     })
     sr.runtime.on('error', (err: Error) => {
       if (isAdapterNoise(err.message)) {
