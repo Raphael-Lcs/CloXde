@@ -157,15 +157,15 @@ const briefing = mkTask('briefing', 'pm')
 eq(transition(briefing, 'HANDOFF'), { nextStatus: 'planning', nextOwner: 'architect' }, 'briefing+HANDOFF -> planning/architect')
 
 const planning = mkTask('planning', 'architect')
-eq(transition(planning, 'PLAN'), { nextStatus: 'planning', nextOwner: 'architect' }, 'planning+PLAN -> stay')
-eq(transition(planning, 'DELEGATE'), { nextStatus: 'executing', nextOwner: 'executor' }, 'planning+DELEGATE -> executing/executor')
+eq(transition(planning, 'PLAN'), { nextStatus: 'planning', nextOwner: 'architect', incrementPlanIterations: true }, 'planning+PLAN -> stay')
+eq(transition(planning, 'DELEGATE'), { nextStatus: 'executing', nextOwner: 'executor', resetPlanIterations: true }, 'planning+DELEGATE -> executing/executor')
 
 const executing = mkTask('executing', 'executor')
-eq(transition(executing, 'REPORT'), { nextStatus: 'review', nextOwner: 'architect' }, 'executing+REPORT -> review/architect')
+eq(transition(executing, 'REPORT'), { nextStatus: 'review', nextOwner: 'architect', incrementReviewCycles: true }, 'executing+REPORT -> review/architect')
 
 const review = mkTask('review', 'architect')
 eq(transition(review, 'DELEGATE'), { nextStatus: 'executing', nextOwner: 'executor' }, 'review+DELEGATE -> executing')
-eq(transition(review, 'DONE'), { nextStatus: 'done', nextOwner: 'pm' }, 'review+DONE -> done/pm')
+eq(transition(review, 'DONE'), { nextStatus: 'done', nextOwner: 'pm', resetReviewCycles: true }, 'review+DONE -> done/pm')
 
 section('transition — FAIL is universal')
 for (const s of allStatuses) {
