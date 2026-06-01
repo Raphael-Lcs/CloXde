@@ -135,9 +135,19 @@ export function describeForbidden(status: TaskStatus, role: Role): string {
 
 // --- Transition rules ------------------------------------------------------
 
+// Loop limits to prevent infinite cycles. When exceeded, the transition
+// returns a special warning that the engine can surface to the agent.
+const MAX_PLAN_ITERATIONS = 3
+const MAX_REVIEW_CYCLES = 5
+
 interface Transition {
   nextStatus: TaskStatus
   nextOwner: Role
+  warning?: string
+  incrementPlanIterations?: boolean
+  incrementReviewCycles?: boolean
+  resetPlanIterations?: boolean
+  resetReviewCycles?: boolean
 }
 
 /** Pure transition — given a task's current state and an action, produces
@@ -163,17 +173,63 @@ export function transition(task: Task, action: TaskAction): Transition | null {
       return null
     case 'planning':
       if (task.owner !== 'architect') return null
-      if (action === 'PLAN') return { nextStatus: 'planning', nextOwner: 'architect' }
-      if (action === 'DELEGATE') return { nextStatus: 'executing', nextOwner: 'executor' }
+      if (action === 'PLAN') {
+        const nextIterations = task.planIterations + 1
+        if (nextIterations > MAX_PLAN_ITERATIONS) {
+          return {
+            nextStatus: 'planning',
+            nextOwner: 'architect',
+            incrementPlanIterations: true,
+            warning: `已连续 ${nextIterations} 轮 PLAN，可能陷入规划死循环。请发 <<DELEGATE>> 开始执行，或 <<FAIL>> 放弃。`
+          }
+        }
+        return {
+          nextStatus: 'planning',
+          nextOwner: 'architect',
+          incrementPlanIterations: true
+        }
+      }
+      if (action === 'DELEGATE') {
+        return {
+          nextStatus: 'executing',
+          nextOwner: 'executor',
+          resetPlanIterations: true
+        }
+      }
       return null
     case 'executing':
       if (task.owner !== 'executor') return null
-      if (action === 'REPORT') return { nextStatus: 'review', nextOwner: 'architect' }
+      if (action === 'REPORT') {
+        return {
+          nextStatus: 'review',
+          nextOwner: 'architect',
+          incrementReviewCycles: true
+        }
+      }
       return null
     case 'review':
       if (task.owner !== 'architect') return null
-      if (action === 'DELEGATE') return { nextStatus: 'executing', nextOwner: 'executor' }
-      if (action === 'DONE') return { nextStatus: 'done', nextOwner: 'pm' }
+      if (action === 'DELEGATE') {
+        const nextCycles = task.reviewCycles + 1
+        if (nextCycles > MAX_REVIEW_CYCLES) {
+          return {
+            nextStatus: 'review',
+            nextOwner: 'architect',
+            warning: `已完成 ${nextCycles} 轮 review→executing 循环，可能陷入无限迭代。请发 <<DONE>> 收工，或 <<FAIL>> 放弃。`
+          }
+        }
+        return {
+          nextStatus: 'executing',
+          nextOwner: 'executor'
+        }
+      }
+      if (action === 'DONE') {
+        return {
+          nextStatus: 'done',
+          nextOwner: 'pm',
+          resetReviewCycles: true
+        }
+      }
       return null
     case 'done':
     case 'failed':

@@ -1327,6 +1327,21 @@ export class ConversationEngine extends EventEmitter {
       status: next.nextStatus,
       owner: next.nextOwner
     }
+
+    // Update iteration counters based on transition flags
+    if (next.incrementPlanIterations) {
+      patches.planIterations = task.planIterations + 1
+    }
+    if (next.incrementReviewCycles) {
+      patches.reviewCycles = task.reviewCycles + 1
+    }
+    if (next.resetPlanIterations) {
+      patches.planIterations = 0
+    }
+    if (next.resetReviewCycles) {
+      patches.reviewCycles = 0
+    }
+
     switch (found.action) {
       case 'PLAN':
         patches.plan = parsePlanSteps(found.body)
@@ -1357,6 +1372,12 @@ export class ConversationEngine extends EventEmitter {
         break
     }
     taskRepo.patch(task.id, patches)
+
+    // If the transition returned a warning, inject it as a system message
+    // to alert the agent about the loop condition.
+    if (next.warning) {
+      this.recordSystemMessage(slot, next.warning)
+    }
 
     // Forward transition → reset stall counter.
     slot.stallNudges = 0

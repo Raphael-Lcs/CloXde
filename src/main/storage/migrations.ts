@@ -389,6 +389,16 @@ const MIGRATIONS: Migration[] = [
           ON assistant_reminders(fire_at);
       `)
     }
+  },
+  {
+    version: 15,
+    name: 'task-iteration-counters',
+    up(db) {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN plan_iterations INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tasks ADD COLUMN review_cycles INTEGER NOT NULL DEFAULT 0;
+      `)
+    }
   }
 ]
 

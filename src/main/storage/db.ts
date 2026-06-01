@@ -727,6 +727,8 @@ interface TaskRow {
   failure_reason: string | null
   created_at: number
   updated_at: number
+  plan_iterations: number
+  review_cycles: number
 }
 
 function rowToTask(row: TaskRow): Task {
@@ -740,12 +742,14 @@ function rowToTask(row: TaskRow): Task {
     result: row.result_text ?? undefined,
     failureReason: row.failure_reason ?? undefined,
     createdAt: row.created_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    planIterations: row.plan_iterations,
+    reviewCycles: row.review_cycles
   }
 }
 
 const TASK_COLUMNS = `id, conversation_id, brief, status, owner, plan_json,
-  result_text, failure_reason, created_at, updated_at`
+  result_text, failure_reason, created_at, updated_at, plan_iterations, review_cycles`
 
 export const taskRepo = {
   get(id: string): Task | null {
@@ -782,14 +786,16 @@ export const taskRepo = {
       status: input.status ?? 'briefing',
       owner: input.owner ?? 'pm',
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      planIterations: 0,
+      reviewCycles: 0
     }
     getDb()
       .prepare(
         `INSERT INTO tasks (id, conversation_id, brief, status, owner,
                             plan_json, result_text, failure_reason,
-                            created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`
+                            created_at, updated_at, plan_iterations, review_cycles)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, 0, 0)`
       )
       .run(task.id, task.conversationId, task.brief, task.status, task.owner, now, now)
     return task
@@ -805,6 +811,8 @@ export const taskRepo = {
       plan?: PlanStep[] | null
       result?: string | null
       failureReason?: string | null
+      planIterations?: number
+      reviewCycles?: number
     }
   ): void {
     const fields: string[] = []
@@ -818,6 +826,8 @@ export const taskRepo = {
     }
     if (patch.result !== undefined) { fields.push('result_text = ?'); values.push(patch.result) }
     if (patch.failureReason !== undefined) { fields.push('failure_reason = ?'); values.push(patch.failureReason) }
+    if (patch.planIterations !== undefined) { fields.push('plan_iterations = ?'); values.push(patch.planIterations) }
+    if (patch.reviewCycles !== undefined) { fields.push('review_cycles = ?'); values.push(patch.reviewCycles) }
     if (fields.length === 0) return
     fields.push('updated_at = ?')
     values.push(Date.now())

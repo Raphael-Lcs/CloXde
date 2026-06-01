@@ -85,6 +85,8 @@ export interface Task {
   failureReason?: string
   createdAt: number
   updatedAt: number
+  planIterations: number
+  reviewCycles: number
 }
 
 // --- Conversations (A2A sessions) ------------------------------------------
