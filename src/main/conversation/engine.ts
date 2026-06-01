@@ -505,7 +505,7 @@ export class ConversationEngine extends EventEmitter {
   isBusy(conversationId: string): boolean {
     const slot = this.active.get(conversationId)
     if (!slot) return false
-    return this.allSides(slot).some((sr) => sr.streamingMessageId)
+    return this.allSides(slot).some((sr) => sr.streamingMessageId || sr.inFlight !== Promise.resolve())
   }
 
   /** True when ANY loaded conversation has a side mid-turn. The assistant's
@@ -514,7 +514,9 @@ export class ConversationEngine extends EventEmitter {
    *  machine performance, even though it wouldn't block the team. */
   anyBusy(): boolean {
     for (const slot of this.active.values()) {
-      if (this.allSides(slot).some((sr) => sr.streamingMessageId)) return true
+      if (this.allSides(slot).some((sr) => sr.streamingMessageId || sr.inFlight !== Promise.resolve())) {
+        return true
+      }
     }
     return false
   }
