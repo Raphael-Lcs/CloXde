@@ -11,7 +11,12 @@
 // Run with:  npx tsx scripts/test-reflection-gate.ts
 // Exit code = number of failures.
 
-import { shouldReflect, REFLECT_INTERVAL_MS_FOR_TEST as IVL } from '../src/main/assistant/review'
+import {
+  shouldReflect,
+  shouldHeartbeat,
+  REFLECT_INTERVAL_MS_FOR_TEST as IVL,
+  HEARTBEAT_INTERVAL_MS_FOR_TEST as HB_IVL
+} from '../src/main/assistant/review'
 
 let passed = 0
 let failed = 0
@@ -50,6 +55,19 @@ assert(shouldReflect(now, now - 2 * IVL, 7, 7, IVL) === false, 'no new turns -> 
 assert(shouldReflect(now, now - 2 * IVL, 7, 6, IVL) === false, 'turns went backwards -> false')
 // One new turn past the recorded count → reflect.
 assert(shouldReflect(now, now - 2 * IVL, 7, 8, IVL) === true, 'one new turn -> true')
+
+section('shouldHeartbeat — interval gate')
+// Just fired; not enough time elapsed → no heartbeat even with work to do.
+assert(shouldHeartbeat(now, now, HB_IVL, true) === false, 'too soon -> false despite work')
+// One ms short of the interval → still false (strictly elapsed).
+assert(shouldHeartbeat(now, now - HB_IVL + 1, HB_IVL, true) === false, 'one ms short -> false')
+// Interval fully elapsed and there's work → heartbeat.
+assert(shouldHeartbeat(now, now - HB_IVL, HB_IVL, true) === true, 'interval elapsed + work -> true')
+
+section('shouldHeartbeat — hasWork gate (blank slate stays silent)')
+// No work to do (no teams, no memories) → never fire, no matter how long idle.
+assert(shouldHeartbeat(now, now - 10 * HB_IVL, HB_IVL, false) === false, 'no work -> false')
+assert(shouldHeartbeat(now, 0, HB_IVL, false) === false, 'no work, never fired -> false')
 
 console.log('\n' + '='.repeat(60))
 console.log(`通过: ${passed}    失败: ${failed}`)

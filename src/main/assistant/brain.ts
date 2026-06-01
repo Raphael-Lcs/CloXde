@@ -51,6 +51,7 @@ export interface Signal {
     | 'instability'
     | 'cron'
     | 'reflection'
+    | 'heartbeat'
   text: string
   /** Optional image/file attachments (base64 data + mimeType). */
   attachments?: { data: string; mimeType: string }[]
@@ -118,10 +119,13 @@ const readWriteFs = {
 
 export class AssistantBrain {
   /** Upper bound on a single think() turn. The 管家 may do real tool work
-   *  itself, so this is generous — substantial/long work is delegated to a
-   *  team, so a turn past this is almost certainly wedged (a stuck tool). We
-   *  cancel and surface an error instead of leaving the UI spinning forever. */
-  private static readonly TURN_TIMEOUT_MS = 240_000
+   *  itself (reading files, running commands, fetching resources), and makes
+   *  complex decisions across the whole system, so this is very generous —
+   *  30 minutes gives it room to complete substantial multi-step work without
+   *  rushing. Truly long work is delegated to a team; a turn past this is
+   *  almost certainly wedged (a stuck tool). We cancel and surface an error
+   *  instead of leaving the UI spinning forever. */
+  private static readonly TURN_TIMEOUT_MS = 1_800_000
   /** After this many turns on one ACP session, compact: drop the session and
    *  reseed a fresh one with the system prompt + a short transcript summary.
    *  The brain is long-lived, so without this its session history grows until
@@ -280,17 +284,27 @@ export class AssistantBrain {
 
   private async thinkOnce(signal: Signal): Promise<ThinkResult> {
     const memory = getMemoryService()
-    // Reflection's signal text is a fixed instruction prompt, not a query, so
-    // embedding it and recalling returns semantic noise — and the reflection pass
-    // already injects its own dedup context. Skip recall for it; recall normally
-    // for conversational / team-activity signals.
-    const hits = signal.kind === 'reflection' ? [] : await memory.recall(signal.text, { k: 6 })
+    // Background maintenance passes (reflection / heartbeat) carry a fixed
+    // instruction prompt as their signal text, not a query — so semantic recall on
+    // it returns noise, and we skip the always-on profile too (they don't need the
+    // standing prefs re-listed). They differ in what they DO need:
+    //   • reflection injects its own dedup context (the known-memories list), so []
+    //   • heartbeat is silent memory upkeep — show it a sample of stored memories
+    //     WITH per-turn [M#] refs so it can tidy them: merge near-dups via
+    //     <<UPDATE>>, drop stale/contradicted ones via <<FORGET>>.
+    const silentBg = signal.kind === 'reflection' || signal.kind === 'heartbeat'
+    const hits: MemoryHit[] =
+      signal.kind === 'heartbeat'
+        ? memory.list({ limit: 30 }).map((m) => ({ ...m, distance: 0 }))
+        : signal.kind === 'reflection'
+          ? []
+          : await memory.recall(signal.text, { k: 6 })
 
     // The always-on profile (pinned + standing preferences) goes in EVERY prompt,
     // not just on a semantic hit — a recall miss must never drop "用中文" and the
-    // like. Reflection already lists everything it knows, so skip there. Dedup
-    // against recalled hits so a memory isn't shown twice.
-    const profile = signal.kind === 'reflection' ? [] : memory.coreProfile()
+    // like. Background maintenance passes already carry their own context, so skip
+    // there. Dedup against recalled hits so a memory isn't shown twice.
+    const profile = silentBg ? [] : memory.coreProfile()
     const profileIds = new Set(profile.map((m) => m.id))
     const recalled = hits.filter((h) => !profileIds.has(h.id))
 
@@ -670,13 +684,19 @@ export class AssistantBrain {
       }
     }
 
-    for (const body of extractAll(raw, 'REPORT')) {
-      actions.reportToUser({
-        message: body,
-        projectId: signal.projectId,
-        conversationId: signal.conversationId
-      })
-      result.reports.push(body)
+    // REPORT surfaces to the user via the assistant bus regardless of which
+    // signal woke the brain. The heartbeat is, by definition, SILENT maintenance —
+    // it must never jump out to talk to the user — so we drop any REPORT it emits
+    // (the prompt also tells it not to, this is the belt-and-suspenders guard).
+    if (signal.kind !== 'heartbeat') {
+      for (const body of extractAll(raw, 'REPORT')) {
+        actions.reportToUser({
+          message: body,
+          projectId: signal.projectId,
+          conversationId: signal.conversationId
+        })
+        result.reports.push(body)
+      }
     }
 
     return result

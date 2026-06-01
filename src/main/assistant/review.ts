@@ -54,6 +54,16 @@ const MESSAGE_RETENTION = 2000
 const REFLECT_INTERVAL_MS = 6 * 60 * 60 * 1000
 export const REFLECT_INTERVAL_MS_FOR_TEST = REFLECT_INTERVAL_MS
 
+/** How often the silent maintenance heartbeat may fire. This is the assistant's
+ *  "breathing" while idle: on a quiet tick where there's nothing else to do (no
+ *  instability, no due reminder, no reflection due, no NEW team activity), it
+ *  wakes the brain to do upkeep that never surfaces to the user — re-examine a
+ *  team still stuck, and tidy its own memory (merge near-dups, drop stale facts).
+ *  Far more frequent than reflection (it's lighter and often a no-op), but still
+ *  rate-limited so an idle machine doesn't burn a turn every 5-min tick. */
+const HEARTBEAT_INTERVAL_MS = 45 * 60 * 1000
+export const HEARTBEAT_INTERVAL_MS_FOR_TEST = HEARTBEAT_INTERVAL_MS
+
 /** The signal text for a reflection pass. The brain already holds its recent
  *  exchanges in-session, so we just ask it to distill them — silently. No prose
  *  reply is surfaced for a 'reflection' turn (runPass discards the result), so we
@@ -97,6 +107,9 @@ let lastReflectedTurns = 0
 /** Newest team-message ts the brain has already reviewed. A pass that sees
  *  nothing newer skips, so a long-idle machine doesn't re-think the same state. */
 let lastReviewedTs = 0
+/** When the silent maintenance heartbeat last fired. Rate-limits it to at most
+ *  once per HEARTBEAT_INTERVAL_MS. */
+let lastHeartbeatAt = 0
 
 /** The event-driven path's debounce timer + the deps it needs to run a pass.
  *  liveDeps is captured when startAssistantReview wires up, so a settle event
@@ -307,6 +320,88 @@ async function maybeReflect(think: ThinkFn, turnCount: TurnCountFn): Promise<boo
   return true
 }
 
+/** Pure decision for the heartbeat gate, extracted for unit testing. Fire only
+ *  when BOTH hold: at least `intervalMs` has elapsed since the last heartbeat,
+ *  AND there's actual upkeep to do (`hasWork`). The hasWork guard is what keeps a
+ *  blank-slate machine (no teams, no memories) silent — there's no point breathing
+ *  into the void — and stops the heartbeat from waking the brain for nothing. */
+export function shouldHeartbeat(
+  now: number,
+  lastAt: number,
+  intervalMs: number,
+  hasWork: boolean
+): boolean {
+  if (!hasWork) return false
+  return now - lastAt >= intervalMs
+}
+
+/** The signal text for a heartbeat pass — silent maintenance the user never
+ *  sees. We DON'T list the brain's memories here (the brain receives them as
+ *  [记忆] with [M#] refs, injected by thinkOnce for a heartbeat signal); this is
+ *  just the instruction + any stuck-team context. */
+const HEARTBEAT_PROMPT = `这是一次静默维护（心跳）。用户**看不到**你这轮的任何输出，所以**绝对不要** <<REPORT>>，也不要写客套话或解释——这一轮只用来悄悄做点维护，能做就做，没有就什么都不做。
+
+可以做的维护：
+- 整理记忆：上面 [记忆] 里若有两条说的是同一件事，用 <<UPDATE>> 把更完整的那条改写好、把另一条用 <<FORGET>> 撤掉；若有哪条已经过时、被推翻或明显是临时垃圾，用 <<FORGET>> 删掉。只在确实该动时才动，别为改而改。
+- 照看团队：下面若列了卡住的团队，判断该不该推它一把——值得就用 <<CONTINUE>> 给它补指示/纠偏；该等就别动。
+没有任何该做的，就空着别动。`
+
+/** Build the heartbeat's team context: owned teams that are currently STUCK
+ *  (halted at awaiting-user under autopilot). The heartbeat only runs on ticks
+ *  where gatherSnapshot already found no NEW activity, so listing every team would
+ *  just nag idle/finished ones — we surface only the ones genuinely waiting on a
+ *  decision, which the brain may have seen settle earlier and chosen to wait on.
+ *  Returns the rendered text (empty when none are stuck). */
+function gatherStuckTeams(): string {
+  const sections: string[] = []
+  for (const project of ownedProjects()) {
+    const convs = conversationRepo.listByProject(project.id)
+    if (convs.length === 0) continue
+    const conv = convs[0]
+    if (!(conv.autopilot && conv.status === 'awaiting-user')) continue
+    const msgs = messageRepo.listRecentByConversation(conv.id, MESSAGES_PER_CONV)
+    const lines = msgs
+      .map((m) => {
+        const t = renderMessageText(m)
+        return t ? `  [${m.side}] ${t.slice(0, 500)}` : ''
+      })
+      .filter(Boolean)
+      .join('\n')
+    sections.push(
+      `# 团队「${project.name}」(状态 ${conv.status}, 会话ID ${conv.id}) ⚠️卡住·待决策\n${lines || '  （无文本消息）'}`
+    )
+  }
+  return sections.join('\n\n')
+}
+
+/** Run the silent maintenance heartbeat at most once per HEARTBEAT_INTERVAL_MS,
+ *  and only when there's real upkeep to do (a stuck team or stored memories worth
+ *  tidying). Assumes the quiet-window + brain-free gates already passed (it runs
+ *  the model) and that this tick had no newer-priority work. The brain's reply is
+ *  never surfaced — REPORT is suppressed for a 'heartbeat' signal in brain.ts. */
+async function maybeHeartbeat(think: ThinkFn): Promise<boolean> {
+  const now = Date.now()
+  const stuckText = gatherStuckTeams()
+  let memoryCount = 0
+  try {
+    memoryCount = getMemoryService().list({ limit: 1 }).length
+  } catch (e) {
+    console.error('[assistant-review] heartbeat memory probe failed:', (e as Error).message)
+  }
+  const hasWork = stuckText.length > 0 || memoryCount > 0
+  if (!shouldHeartbeat(now, lastHeartbeatAt, HEARTBEAT_INTERVAL_MS, hasWork)) return false
+  lastHeartbeatAt = now
+  try {
+    const text = stuckText
+      ? `${HEARTBEAT_PROMPT}\n\n下面是当前卡住的团队：\n${stuckText}`
+      : HEARTBEAT_PROMPT
+    await think({ kind: 'heartbeat', text })
+  } catch (e) {
+    console.error('[assistant-review] heartbeat failed:', (e as Error).message)
+  }
+  return true
+}
+
 /** Fire the brain's own due self-reminders. At most one per pass (each spends a
  *  brain turn), soonest-first; advance/clear the row BEFORE thinking so a slow or
  *  failed turn can't refire it. One-shot rows are deleted; recurring rows recompute
@@ -365,7 +460,13 @@ async function runPass(
     if (await maybeFireReminders(think)) return
     if (await maybeReflect(think, turnCount)) return
     const snapshot = gatherSnapshot()
-    if (!snapshot) return
+    // No NEW team activity to review — fall through to the silent maintenance
+    // heartbeat (rate-limited, often a no-op). This is the only path that runs the
+    // brain on a genuinely idle machine, so it's where "breathing" lives.
+    if (!snapshot) {
+      await maybeHeartbeat(think)
+      return
+    }
     // A stuck team (halted under autopilot) is a capability-gap the brain should
     // treat as "needs a decision now", not a routine progress check — classify
     // the signal so the prompt can bias toward CONTINUE / intervention.
@@ -405,6 +506,9 @@ export function startAssistantReview(opts?: {
   // only counts turns that happen from now on.
   lastReflectedAt = Date.now()
   lastReflectedTurns = turnCount()
+  // Seed the heartbeat gate so the first one waits a full interval rather than
+  // firing on the app's first idle tick.
+  lastHeartbeatAt = Date.now()
   timer = setInterval(
     () => void runPass(anyBusy, think, brainBusy, turnCount),
     opts?.intervalMs ?? REVIEW_INTERVAL_MS
@@ -444,4 +548,5 @@ export function stopAssistantReview(): void {
   lastPrunedAt = 0
   lastReflectedAt = 0
   lastReflectedTurns = 0
+  lastHeartbeatAt = 0
 }
