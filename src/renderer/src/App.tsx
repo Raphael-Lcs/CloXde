@@ -86,7 +86,8 @@ export function App(): JSX.Element {
   const [paletteOpen, setPaletteOpen] = useState(false)
   // Standalone assistant view — the user-scoped layer above the team. When
   // open, it replaces the project/conversation main area.
-  const [assistantOpen, setAssistantOpen] = useState(false)
+  // DEFAULT TO TRUE: assistant is now the primary interface, teams are secondary.
+  const [assistantOpen, setAssistantOpen] = useState(true)
   // Unread proactive reports from the assistant's review loop. Drives a count
   // badge on the titlebar assistant button so the user notices a report even
   // when the panel is closed. Cleared when the panel is opened.
@@ -720,6 +721,7 @@ export function App(): JSX.Element {
           onNewProject={() => void handleOpenFolder()}
           onOpenSettings={() => setSettingsOpen(true)}
           versionLabel={version ? `CloXde · v${version}` : ''}
+          assistantMode={assistantOpen}
         />
         <main className="main">
           {assistantOpen ? (

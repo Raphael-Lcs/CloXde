@@ -17,6 +17,8 @@ interface SidebarProps {
   onNewProject: () => void
   onOpenSettings: () => void
   versionLabel: string
+  /** When true, show a simplified assistant-centric view with team status. */
+  assistantMode?: boolean
 }
 
 export function Sidebar({
@@ -33,7 +35,8 @@ export function Sidebar({
   onOpenArchive,
   onNewProject,
   onOpenSettings,
-  versionLabel
+  versionLabel,
+  assistantMode = false
 }: SidebarProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [query, setQuery] = useState('')
@@ -63,10 +66,15 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="section">
-        <h3>项目</h3>
-        <button className="sidebar-primary" onClick={onNewProject}>
-          + 新建项目
-        </button>
+        <h3>{assistantMode ? '工作组' : '项目'}</h3>
+        {!assistantMode && (
+          <button className="sidebar-primary" onClick={onNewProject}>
+            + 新建项目
+          </button>
+        )}
+        {assistantMode && projects.length === 0 && (
+          <div className="sidebar-hint">助理会自动创建工作组</div>
+        )}
       </div>
       {projects.length > 0 && (
         <div className="sidebar-filter">
@@ -98,7 +106,7 @@ export function Sidebar({
         </div>
       )}
       <div className="project-list">
-        {projects.length === 0 && (
+        {projects.length === 0 && !assistantMode && (
           <div className="sidebar-empty">暂无项目</div>
         )}
         {noMatches && <div className="sidebar-empty">无匹配会话</div>}
@@ -108,6 +116,37 @@ export function Sidebar({
           const convs = filterConvs(conversationsByProject[p.id] ?? [])
           if (filterActive && convs.length === 0) return null
           const archivedCount = (archivedByProject[p.id] ?? []).length
+
+          // Assistant mode: simplified team status view
+          if (assistantMode) {
+            const activeConv = convs.find(c => c.status === 'thinking' || c.status === 'awaiting-user')
+            const statusLabel = activeConv
+              ? activeConv.status === 'thinking' ? '工作中' : '等待中'
+              : convs.length > 0 ? '已完成' : '空闲'
+            const statusClass = activeConv
+              ? activeConv.status === 'thinking' ? 'thinking' : 'awaiting-user'
+              : convs.length > 0 ? 'ended' : 'idle'
+
+            return (
+              <div
+                key={p.id}
+                className={`team-status-item ${isActive ? 'active' : ''}`}
+                onClick={() => onSelectProject(p.id)}
+                title={`${p.name} - ${p.rootDir}`}
+              >
+                <span className={`team-status-dot ${statusClass}`} />
+                <div className="team-status-meta">
+                  <div className="team-name">{p.name}</div>
+                  <div className="team-status">{statusLabel}</div>
+                </div>
+                {convs.length > 0 && (
+                  <span className="team-conv-count">{convs.length}</span>
+                )}
+              </div>
+            )
+          }
+
+          // Normal mode: full project tree
           return (
             <div key={p.id}>
               <div
