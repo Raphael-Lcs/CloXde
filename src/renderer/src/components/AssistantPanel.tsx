@@ -4,7 +4,9 @@ import type {
   AssistantMemory,
   AssistantMessageRecord,
   AssistantReport,
-  MemoryKind
+  MemoryKind,
+  Project,
+  Conversation
 } from '@shared/types'
 import { isAssistantSoundEnabled, playAssistantChime } from '../lib/sound'
 
@@ -17,6 +19,10 @@ interface AssistantPanelProps {
   /** Jump into a team conversation the assistant dispatched/continued, closing
    *  the panel. Wired to App's jumpToConversation. */
   onNavigate: (projectId: string, conversationId: string) => void
+  /** All projects for displaying team status. */
+  projects: Project[]
+  /** Conversations by project for displaying team status. */
+  conversationsByProject: Record<string, Conversation[]>
 }
 
 interface Entry {
@@ -74,7 +80,7 @@ function recordToEntry(r: AssistantMessageRecord): Entry {
   }
 }
 
-export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element {
+export function AssistantPanel({ onNavigate, projects, conversationsByProject }: AssistantPanelProps): JSX.Element {
   const [entries, setEntries] = useState<Entry[]>(cachedEntries)
   const [draft, setDraft] = useState(() => {
     try {
@@ -647,6 +653,38 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
               onChange={(e) => setSoulText(e.target.value)}
             />
           </div>
+        </div>
+      )}
+      {/* Compact team status overview - shows active teams inline */}
+      {projects.length > 0 && (
+        <div className="assistant-teams-status">
+          {projects.map((p) => {
+            const convs = conversationsByProject[p.id] ?? []
+            const activeConv = convs.find(c => c.status === 'thinking' || c.status === 'awaiting-user')
+            if (!activeConv && convs.length === 0) return null
+
+            const statusLabel = activeConv
+              ? activeConv.status === 'thinking' ? '工作中' : '等待中'
+              : '已完成'
+            const statusClass = activeConv
+              ? activeConv.status === 'thinking' ? 'thinking' : 'awaiting-user'
+              : 'ended'
+
+            return (
+              <div
+                key={p.id}
+                className={`team-status-card ${statusClass}`}
+                onClick={() => activeConv && onNavigate(p.id, activeConv.id)}
+                title={activeConv ? `点击查看 ${p.name}` : undefined}
+              >
+                <span className={`team-status-indicator ${statusClass}`} />
+                <div className="team-status-info">
+                  <div className="team-status-name">{p.name}</div>
+                  <div className="team-status-label">{statusLabel}</div>
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
       <div className="assistant-stream" ref={scrollRef}>

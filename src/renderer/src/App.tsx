@@ -443,14 +443,6 @@ export function App(): JSX.Element {
     [jumpToConversation]
   )
 
-  // In assistant mode, auto-open team panel when a project is selected
-  // so the user can see the team's work without leaving the assistant.
-  useEffect(() => {
-    if (assistantOpen && activeProjectId && !teamPanelOpen) {
-      setRightPanels((list) => [...list, 'team'])
-    }
-  }, [assistantOpen, activeProjectId, teamPanelOpen])
-
   // Conversations (across all loaded projects) currently waiting on the user.
   const waitingConversations = useMemo(() => {
     const out: { projectId: string; projectName: string; conv: Conversation }[] = []
@@ -738,7 +730,11 @@ export function App(): JSX.Element {
         />
         <main className="main">
           {assistantOpen ? (
-            <AssistantPanel onNavigate={navigateFromAssistant} />
+            <AssistantPanel
+              onNavigate={navigateFromAssistant}
+              projects={projects}
+              conversationsByProject={conversationsByProject}
+            />
           ) : !activeProject ? (
             <EmptyHero onOpen={() => void handleOpenFolder()} />
           ) : !conversation ? (
