@@ -317,6 +317,12 @@ export async function promoteSelfImprovement(
  */
 export function restartIntoNewCode(): void {
   const { app } = require('electron') as typeof import('electron')
+  const { setSupervisorIntent, flushSupervisorIntent } =
+    require('../supervisor-intent') as typeof import('../supervisor-intent')
   console.log('[selfmod] restarting into promoted code (exit 42)')
+  // Tell the supervisor this is an intentional restart, not a crash. The file
+  // is authoritative; the exit code 42 is just a hint electron-vite may eat.
+  setSupervisorIntent('restart')
+  flushSupervisorIntent()
   app.exit(42)
 }

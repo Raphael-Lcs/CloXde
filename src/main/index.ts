@@ -10,6 +10,7 @@ import { warmupEmbedder } from './assistant/embedder'
 import { getAssistantBrain } from './assistant/brain'
 import { stopAllWatches } from './fs/inspector'
 import { startHttpServer, stopHttpServer } from './server/http-server'
+import { setSupervisorIntent, flushSupervisorIntent } from './supervisor-intent'
 
 const APP_PROTOCOL = 'cloxde'
 
@@ -119,6 +120,16 @@ function setupTray(): void {
       click: () => showOrCreateWindow()
     },
     { type: 'separator' },
+    {
+      label: '重启 CloXde',
+      click: () => {
+        // Direct restart: ask the supervisor to respawn after a graceful quit,
+        // rather than the user having to quit then reopen the shortcut.
+        setSupervisorIntent('restart')
+        isQuitting = true
+        app.quit()
+      }
+    },
     {
       label: '退出 CloXde',
       click: () => {
@@ -318,6 +329,11 @@ app.on('before-quit', (event) => {
   // and lets the window actually close. Covers Cmd+Q on macOS, programmatic
   // app.quit() calls, and OS shutdown.
   isQuitting = true
+
+  // Tell the supervisor what this exit means: 'restart' if a tray "重启" set it,
+  // otherwise 'quit'. Written here (before async teardown) so it's on disk no
+  // matter which exit path below fires. Absence of the file = a crash.
+  flushSupervisorIntent()
 
   // Teardown is async (killing ACP child processes, closing the LAN server's
   // sockets). The previous code fired these with `void` and let app.quit()
