@@ -298,7 +298,7 @@ export class AssistantBrain {
         ? memory.list({ limit: 30 }).map((m) => ({ ...m, distance: 0 }))
         : signal.kind === 'reflection'
           ? []
-          : await memory.recall(signal.text, { k: 6 })
+          : await memory.recall(signal.text, { k: 3 })
 
     // The always-on profile (pinned + standing preferences) goes in EVERY prompt,
     // not just on a semantic hit — a recall miss must never drop "用中文" and the

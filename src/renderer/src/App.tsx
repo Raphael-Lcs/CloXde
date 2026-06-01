@@ -605,10 +605,15 @@ export function App(): JSX.Element {
   }, [conversation, NOISE_RE])
 
   // Body grid columns: 280px sidebar | 1fr main | (optional resizable drawer).
+  // In assistant mode, hide the sidebar completely.
   const drawerOpen = !!activeProject && rightPanels.length > 0
-  const bodyStyle = drawerOpen
-    ? { gridTemplateColumns: `280px 1fr ${rightDrawerWidth}px` }
-    : undefined
+  const bodyStyle = assistantOpen
+    ? drawerOpen
+      ? { gridTemplateColumns: `1fr ${rightDrawerWidth}px` }
+      : { gridTemplateColumns: '1fr' }
+    : drawerOpen
+      ? { gridTemplateColumns: `280px 1fr ${rightDrawerWidth}px` }
+      : undefined
 
   return (
     <div className="app">
@@ -711,23 +716,25 @@ export function App(): JSX.Element {
         )}
       </div>
       <div className="body" style={bodyStyle}>
-        <Sidebar
-          projects={projects}
-          conversationsByProject={conversationsByProject}
-          archivedByProject={archivedByProject}
-          activeProjectId={activeProjectId}
-          activeConversationId={activeConvId}
-          onSelectProject={(id) => void handleSelectProject(id)}
-          onSelectConversation={handleSelectConversation}
-          onNewConversation={(pid) => void handleNewConversation(pid)}
-          onArchiveConversation={(id) => void handleArchiveConversation(id)}
-          onArchiveProject={(id) => void handleArchiveProject(id)}
-          onOpenArchive={(pid) => setArchiveDialogProjectId(pid)}
-          onNewProject={() => void handleOpenFolder()}
-          onOpenSettings={() => setSettingsOpen(true)}
-          versionLabel={version ? `CloXde · v${version}` : ''}
-          assistantMode={assistantOpen}
-        />
+        {!assistantOpen && (
+          <Sidebar
+            projects={projects}
+            conversationsByProject={conversationsByProject}
+            archivedByProject={archivedByProject}
+            activeProjectId={activeProjectId}
+            activeConversationId={activeConvId}
+            onSelectProject={(id) => void handleSelectProject(id)}
+            onSelectConversation={handleSelectConversation}
+            onNewConversation={(pid) => void handleNewConversation(pid)}
+            onArchiveConversation={(id) => void handleArchiveConversation(id)}
+            onArchiveProject={(id) => void handleArchiveProject(id)}
+            onOpenArchive={(pid) => setArchiveDialogProjectId(pid)}
+            onNewProject={() => void handleOpenFolder()}
+            onOpenSettings={() => setSettingsOpen(true)}
+            versionLabel={version ? `CloXde · v${version}` : ''}
+            assistantMode={assistantOpen}
+          />
+        )}
         <main className="main">
           {assistantOpen ? (
             <AssistantPanel

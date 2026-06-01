@@ -2923,100 +2923,112 @@ body.col-resizing * { cursor: col-resize !important; }
   color: var(--accent);
 }
 
-/* --- Assistant Panel: Inline Team Status Cards --------------------------- */
+/* --- Assistant Panel: Minimal Status Bar (细线条，不占空间) -------------- */
 
-.assistant-teams-status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border-soft);
-  background: var(--bg-elev);
-}
-
-.team-status-card {
+.assistant-status-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 120ms;
-  min-width: 140px;
+  gap: 16px;
+  padding: 6px 16px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11px;
+  min-height: 32px;
 }
 
-.team-status-card:hover {
-  background: var(--bg-elev-3);
-  border-color: var(--border);
-}
-
-.team-status-card.thinking {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg-elev-2));
-}
-
-.team-status-card.awaiting-user {
-  border-color: var(--accent-warm);
-  background: color-mix(in srgb, var(--accent-warm) 8%, var(--bg-elev-2));
-}
-
-.team-status-card.ended {
-  cursor: default;
-  opacity: 0.7;
-}
-
-.team-status-card.ended:hover {
-  background: var(--bg-elev-2);
-  border-color: var(--border-soft);
-}
-
-.team-status-indicator {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--fg-muted);
-}
-
-.team-status-indicator.thinking {
-  background: var(--accent);
-  animation: pulse-indicator 1.5s ease-in-out infinite;
-}
-
-.team-status-indicator.awaiting-user {
-  background: var(--accent-warm);
-}
-
-.team-status-indicator.ended {
-  background: var(--ok);
-}
-
-@keyframes pulse-indicator {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(1.2); }
-}
-
-.team-status-info {
-  flex: 1;
-  min-width: 0;
+.status-bar-item {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms;
+  position: relative;
 }
 
-.team-status-name {
+.status-bar-item:hover {
+  background: var(--bg-elev-2);
+}
+
+.status-bar-icon {
   font-size: 12px;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.status-bar-name {
+  font-size: 11px;
   font-weight: 500;
   color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  letter-spacing: -0.01em;
 }
 
-.team-status-label {
+.status-bar-progress {
+  width: 50px;
+  height: 3px;
+  background: var(--bg-elev-2);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+
+.status-bar-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-warm));
+  border-radius: 2px;
+  transition: width 400ms cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+
+.status-bar-progress-fill::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+  animation: shimmer-fast 1.5s infinite;
+}
+
+@keyframes shimmer-fast {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.status-bar-progress-label {
   font-size: 10px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 28px;
+  text-align: center;
+}
+
+.status-bar-pulse {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.status-bar-pulse.active {
+  background: var(--accent);
+  animation: pulse-tiny 1.5s ease-in-out infinite;
+  box-shadow: 0 0 4px var(--accent);
+}
+
+@keyframes pulse-tiny {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Hide old card styles */
+.assistant-active-teams {
+  display: none;
+}
   color: var(--fg-dim);
   text-transform: uppercase;
   letter-spacing: 0.3px;

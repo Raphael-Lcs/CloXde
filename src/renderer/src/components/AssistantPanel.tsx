@@ -126,6 +126,19 @@ export function AssistantPanel({ onNavigate, projects, conversationsByProject }:
   const attachIdRef = useRef(0)
   const thoughtLogRef = useRef<HTMLDivElement>(null)
 
+  // Active teams: only show projects with conversations that are actively working
+  // (thinking or awaiting-user), not idle/ended ones.
+  const activeTeams = projects
+    .map((p) => {
+      const convs = conversationsByProject[p.id] ?? []
+      const activeConv = convs.find(
+        (c) => c.status === 'thinking' || c.status === 'awaiting-user'
+      )
+      if (!activeConv) return null
+      return { project: p, conversation: activeConv }
+    })
+    .filter((t): t is NonNullable<typeof t> => t !== null)
+
   const append = useCallback(
     (
       role: Entry['role'],
@@ -655,33 +668,56 @@ export function AssistantPanel({ onNavigate, projects, conversationsByProject }:
           </div>
         </div>
       )}
-      {/* Compact team status overview - shows active teams inline */}
-      {projects.length > 0 && (
-        <div className="assistant-teams-status">
-          {projects.map((p) => {
-            const convs = conversationsByProject[p.id] ?? []
-            const activeConv = convs.find(c => c.status === 'thinking' || c.status === 'awaiting-user')
-            if (!activeConv && convs.length === 0) return null
+      {/* Active teams status - minimal status bar style */}
+      {activeTeams.length > 0 && (
+        <div className="assistant-status-bar">
+          {activeTeams.map(({ project, conversation }) => {
+            const isThinking = conversation.status === 'thinking'
+            const busySide = conversation.busySide || 'pm'
+            const roleIcon = busySide === 'pm' ? '📋' : busySide === 'architect' ? '🏗️' : '⚙️'
 
-            const statusLabel = activeConv
-              ? activeConv.status === 'thinking' ? '工作中' : '等待中'
-              : '已完成'
-            const statusClass = activeConv
-              ? activeConv.status === 'thinking' ? 'thinking' : 'awaiting-user'
-              : 'ended'
+            // Calculate progress - show even if no plan
+            let progress = 0
+            let progressLabel = ''
+
+            if (conversation.activeTask) {
+              const task = conversation.activeTask
+              if (task.plan && task.plan.length > 0) {
+                const completed = task.plan.filter(s => s.status === 'completed').length
+                const total = task.plan.length
+                progress = total > 0 ? (completed / total) * 100 : 0
+                progressLabel = `${completed}/${total}`
+              } else {
+                // No plan yet, show status-based progress
+                const statusProgress = {
+                  briefing: 10,
+                  planning: 25,
+                  executing: 50,
+                  review: 75,
+                  done: 100,
+                  failed: 0
+                }
+                progress = statusProgress[task.status] || 0
+                progressLabel = task.status === 'planning' ? '规划' :
+                               task.status === 'executing' ? '执行' :
+                               task.status === 'review' ? '审查' : '进行中'
+              }
+            }
 
             return (
               <div
-                key={p.id}
-                className={`team-status-card ${statusClass}`}
-                onClick={() => activeConv && onNavigate(p.id, activeConv.id)}
-                title={activeConv ? `点击查看 ${p.name}` : undefined}
+                key={project.id}
+                className="status-bar-item"
+                onClick={() => onNavigate(project.id, conversation.id)}
+                title={`${project.name} - ${isThinking ? '工作中' : '等待输入'}${progressLabel ? ` (${progressLabel})` : ''}`}
               >
-                <span className={`team-status-indicator ${statusClass}`} />
-                <div className="team-status-info">
-                  <div className="team-status-name">{p.name}</div>
-                  <div className="team-status-label">{statusLabel}</div>
+                <span className="status-bar-icon">{roleIcon}</span>
+                <span className="status-bar-name">{project.name}</span>
+                <div className="status-bar-progress">
+                  <div className="status-bar-progress-fill" style={{ width: `${progress}%` }} />
                 </div>
+                {progressLabel && <span className="status-bar-progress-label">{progressLabel}</span>}
+                <span className={`status-bar-pulse ${isThinking ? 'active' : ''}`} />
               </div>
             )
           })}

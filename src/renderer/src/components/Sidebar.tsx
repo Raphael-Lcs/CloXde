@@ -119,13 +119,30 @@ export function Sidebar({
 
           // Assistant mode: simplified team status view
           if (assistantMode) {
-            const activeConv = convs.find(c => c.status === 'thinking' || c.status === 'awaiting-user')
-            const statusLabel = activeConv
-              ? activeConv.status === 'thinking' ? '工作中' : '等待中'
-              : convs.length > 0 ? '已完成' : '空闲'
-            const statusClass = activeConv
-              ? activeConv.status === 'thinking' ? 'thinking' : 'awaiting-user'
-              : convs.length > 0 ? 'ended' : 'idle'
+            // Priority: thinking > awaiting-user > paused > idle/ended
+            const thinkingConv = convs.find(c => c.status === 'thinking')
+            const awaitingConv = convs.find(c => c.status === 'awaiting-user')
+            const pausedConv = convs.find(c => c.status === 'paused')
+
+            let statusLabel: string
+            let statusClass: string
+
+            if (thinkingConv) {
+              statusLabel = '工作中'
+              statusClass = 'thinking'
+            } else if (awaitingConv) {
+              statusLabel = '等待输入'
+              statusClass = 'awaiting-user'
+            } else if (pausedConv) {
+              statusLabel = '已暂停'
+              statusClass = 'paused'
+            } else if (convs.length > 0) {
+              statusLabel = '空闲'
+              statusClass = 'idle'
+            } else {
+              statusLabel = '无会话'
+              statusClass = 'idle'
+            }
 
             return (
               <div

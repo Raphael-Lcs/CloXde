@@ -37,7 +37,10 @@ type ThinkFn = (signal: Signal) => Promise<unknown>
 type TurnCountFn = () => number
 
 const REVIEW_INTERVAL_MS = 5 * 60 * 1000
-const MESSAGES_PER_CONV = 6
+// In 3-agent mode, PM wraps the architect+executor dialog, so the final PM
+// summary may be buried under many team turns. We need enough messages to
+// capture the PM's acceptance report, not just the last few executor lines.
+const MESSAGES_PER_CONV = 20
 /** How often the decay pass runs. Memory is otherwise append-only, so without
  *  this it grows unbounded — stale, low-confidence, unpinned memories never
  *  leave. Daily is plenty: pruning is cheap and the staleness window is 30d. */
@@ -175,9 +178,16 @@ function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | 
     const convs = conversationRepo.listByProject(project.id)
     if (convs.length === 0) continue
     const conv = convs[0] // listByProject is created_at DESC → most recent first
-    const msgs = messageRepo.listRecentByConversation(conv.id, MESSAGES_PER_CONV)
-    if (msgs.length === 0) continue
-    const convNewest = msgs[msgs.length - 1].ts
+    const allMsgs = messageRepo.listRecentByConversation(conv.id, MESSAGES_PER_CONV)
+    if (allMsgs.length === 0) continue
+
+    // In 3-agent mode, the PM is the one who reports to the assistant. Filter to
+    // PM messages only so the assistant sees the acceptance summary, not the
+    // buried architect+executor back-and-forth. In 2-agent mode (no PM), show all.
+    const hasPm = allMsgs.some((m) => m.side === 'pm')
+    const msgs = hasPm ? allMsgs.filter((m) => m.side === 'pm') : allMsgs
+
+    const convNewest = allMsgs[allMsgs.length - 1].ts
     if (convNewest > newestTs) newestTs = convNewest
     const needsAttention = conv.autopilot && conv.status === 'awaiting-user'
     if (needsAttention) stuck = true
