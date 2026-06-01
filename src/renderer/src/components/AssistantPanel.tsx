@@ -653,9 +653,19 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
         <div className="assistant-stream-inner">
         {entries.length === 0 ? (
           <div className="assistant-empty">
-            和助理说点什么吧。它不会自己写代码——它会判断、决定，然后把活派给团队。
-            <br />
-            输入 /new 可开启全新会话；它会自己记住要紧的事，需要时输入 /memory 看一眼，/persona 调它的性格。
+            <div className="assistant-welcome-title">👋 你好，我是你的助理</div>
+            <div className="assistant-welcome-text">
+              我负责理解你的需求、做决策，然后把具体工作派给专业团队。
+              <br />
+              你只需要告诉我想做什么，我会处理剩下的一切。
+            </div>
+            <div className="assistant-welcome-tips">
+              <div className="tip-title">💡 快速开始：</div>
+              <div className="tip-item">• 直接说出你的需求，比如"帮我优化这个项目的性能"</div>
+              <div className="tip-item">• 输入 <code>/new</code> 开启全新会话</div>
+              <div className="tip-item">• 输入 <code>/memory</code> 查看我记住的事情</div>
+              <div className="tip-item">• 输入 <code>/persona</code> 调整我的性格和行为</div>
+            </div>
           </div>
         ) : (
           entries.map((e) => {

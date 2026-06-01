@@ -208,11 +208,16 @@ export function App(): JSX.Element {
   const handleSelectProject = useCallback(
     async (id: string) => {
       setActiveProjectId(id)
-      await window.api.projects.open(id)
-      await refreshProjects()
+      // In assistant mode, keep the assistant panel open and just update
+      // the active project for the right-side team panel. In normal mode,
+      // open the project and close the assistant.
+      if (!assistantOpen) {
+        await window.api.projects.open(id)
+        await refreshProjects()
+      }
       void refreshConversations(id)
     },
-    [refreshProjects, refreshConversations]
+    [refreshProjects, refreshConversations, assistantOpen]
   )
 
   const handleArchiveProject = useCallback(
@@ -437,6 +442,14 @@ export function App(): JSX.Element {
     },
     [jumpToConversation]
   )
+
+  // In assistant mode, auto-open team panel when a project is selected
+  // so the user can see the team's work without leaving the assistant.
+  useEffect(() => {
+    if (assistantOpen && activeProjectId && !teamPanelOpen) {
+      setRightPanels((list) => [...list, 'team'])
+    }
+  }, [assistantOpen, activeProjectId, teamPanelOpen])
 
   // Conversations (across all loaded projects) currently waiting on the user.
   const waitingConversations = useMemo(() => {
