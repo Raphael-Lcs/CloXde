@@ -201,6 +201,14 @@ const api = {
     onActivity: (cb: (activity: AssistantActivity) => void): Unsubscribe =>
       on<AssistantActivity>(IPC.AssistantActivityEvent, cb)
   },
+  wechat: {
+    startLogin: (): Promise<IpcResult<{ qrcodeUrl: string }>> =>
+      ipcRenderer.invoke(IPC.WeChatStartLogin),
+    getStatus: (): Promise<
+      IpcResult<{ loggedIn: boolean; accountId: string | null }>
+    > => ipcRenderer.invoke(IPC.WeChatGetStatus),
+    logout: (): Promise<IpcResult<true>> => ipcRenderer.invoke(IPC.WeChatLogout)
+  },
   fs: {
     listDir: (projectId: string, relPath: string): Promise<IpcResult<DirEntry[]>> =>
       ipcRenderer.invoke(IPC.FsListDir, projectId, relPath),

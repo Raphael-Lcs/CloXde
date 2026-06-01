@@ -11,6 +11,7 @@ import { getAssistantBrain } from './assistant/brain'
 import { stopAllWatches } from './fs/inspector'
 import { startHttpServer, stopHttpServer } from './server/http-server'
 import { setSupervisorIntent, flushSupervisorIntent } from './supervisor-intent'
+import * as wechatChannel from './wechat/channel'
 
 const APP_PROTOCOL = 'cloxde'
 
@@ -258,6 +259,13 @@ app.whenReady().then(() => {
     console.error('[server] failed to start:', e)
   }
 
+  // Start WeChat channel (restores from saved credential or waits for login).
+  try {
+    wechatChannel.start()
+  } catch (e) {
+    console.error('[wechat] failed to start channel:', e)
+  }
+
   setupTray()
   configureAutoLaunch()
 
@@ -356,7 +364,8 @@ app.on('before-quit', (event) => {
       await Promise.allSettled([
         conversationEngine.disposeAll(),
         getAssistantBrain().dispose(),
-        stopHttpServer()
+        stopHttpServer(),
+        Promise.resolve(wechatChannel.stop())
       ])
       closeStorage()
     } catch (e) {

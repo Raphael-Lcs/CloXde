@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import QRCode from 'qrcode'
 import type { AgentKind, AgentProfile, Project } from '@shared/types'
 import { isAssistantSoundEnabled, setAssistantSoundEnabled } from '../lib/sound'
 import { TwoClickButton } from './TwoClickButton'
@@ -16,7 +17,7 @@ interface SettingsDialogProps {
   onDeleteProject: (id: string) => void
 }
 
-type SectionId = 'agent' | 'general' | 'archived-projects' | 'lan' | 'about'
+type SectionId = 'agent' | 'general' | 'archived-projects' | 'lan' | 'wechat' | 'about'
 
 interface SectionMeta {
   id: SectionId
@@ -29,6 +30,7 @@ const SECTIONS: SectionMeta[] = [
   { id: 'agent', label: 'Agent 设置', requiresProject: true },
   { id: 'general', label: '通用' },
   { id: 'lan', label: '平板互联' },
+  { id: 'wechat', label: '微信' },
   { id: 'archived-projects', label: '归档项目' },
   { id: 'about', label: '关于' }
 ]
@@ -115,6 +117,7 @@ export function SettingsDialog({
             )}
             {active === 'general' && <GeneralSection />}
             {active === 'lan' && <LanSection />}
+            {active === 'wechat' && <WechatSection />}
             {active === 'about' && <AboutSection />}
           </div>
         </div>
@@ -539,6 +542,144 @@ function LanSection(): JSX.Element {
           ) : null}
         </ul>
       )}
+    </div>
+  )
+}
+
+// --- WeChat channel section -----------------------------------------------
+
+interface WechatStatus {
+  loggedIn: boolean
+  accountId: string | null
+}
+
+function WechatSection(): JSX.Element {
+  const [wechatStatus, setWechatStatus] = useState<WechatStatus>({
+    loggedIn: false,
+    accountId: null
+  })
+  const [wechatQrcode, setWechatQrcode] = useState<string | null>(null)
+  const [wechatLoading, setWechatLoading] = useState(false)
+  const [wechatError, setWechatError] = useState('')
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearLoginTimers = (): void => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    pollRef.current = null
+    timeoutRef.current = null
+  }
+
+  const reloadStatus = async (): Promise<void> => {
+    const result = await window.api.wechat.getStatus()
+    if (result.ok) setWechatStatus(result.data)
+    else setWechatError(result.error)
+  }
+
+  useEffect(() => {
+    void reloadStatus()
+    return () => clearLoginTimers()
+  }, [])
+
+  const handleWechatLogin = async (): Promise<void> => {
+    clearLoginTimers()
+    setWechatLoading(true)
+    setWechatQrcode(null)
+    setWechatError('')
+
+    try {
+      const result = await window.api.wechat.startLogin()
+      if (!result.ok) {
+        setWechatError(result.error)
+        setWechatLoading(false)
+        return
+      }
+
+      const qrcodeDataUrl = await QRCode.toDataURL(result.data.qrcodeUrl, {
+        width: 200,
+        margin: 2,
+        color: { dark: '#000000', light: '#FFFFFF' }
+      })
+      setWechatQrcode(qrcodeDataUrl)
+
+      pollRef.current = setInterval(() => {
+        void window.api.wechat.getStatus().then((statusResult) => {
+          if (statusResult.ok && statusResult.data.loggedIn) {
+            setWechatStatus(statusResult.data)
+            setWechatQrcode(null)
+            setWechatLoading(false)
+            clearLoginTimers()
+          } else if (!statusResult.ok) {
+            setWechatError(statusResult.error)
+          }
+        })
+      }, 2000)
+
+      timeoutRef.current = setTimeout(() => {
+        clearLoginTimers()
+        setWechatLoading(false)
+        setWechatQrcode(null)
+        setWechatError('登录超时，请重新扫码')
+      }, 180000)
+    } catch (e) {
+      setWechatError((e as Error).message)
+      setWechatLoading(false)
+      clearLoginTimers()
+    }
+  }
+
+  const handleWechatLogout = async (): Promise<void> => {
+    const result = await window.api.wechat.logout()
+    if (result.ok) {
+      clearLoginTimers()
+      setWechatStatus({ loggedIn: false, accountId: null })
+      setWechatQrcode(null)
+      setWechatLoading(false)
+      setWechatError('')
+    } else {
+      setWechatError(result.error)
+    }
+  }
+
+  return (
+    <div className="settings-pane">
+      <h3 style={{ marginTop: 0 }}>微信登录</h3>
+
+      {wechatStatus.loggedIn ? (
+        <div className="wechat-logged-in">
+          <div>
+            <div className="wechat-status-title">已登录</div>
+            <code className="wechat-account">{wechatStatus.accountId}</code>
+          </div>
+          <button onClick={() => void handleWechatLogout()}>登出</button>
+        </div>
+      ) : (
+        <div className="wechat-login">
+          {wechatQrcode ? (
+            <div className="qrcode-container">
+              <img src={wechatQrcode} alt="微信登录二维码" />
+              <p>请使用微信扫码登录</p>
+            </div>
+          ) : (
+            <button
+              onClick={() => void handleWechatLogin()}
+              disabled={wechatLoading}
+              className="primary"
+            >
+              {wechatLoading ? '加载中...' : '开始登录'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {wechatError ? <p className="wechat-error">{wechatError}</p> : null}
+
+      <div className="wechat-info">
+        <p className="info-text">
+          登录后，可以在微信私聊中与 CloXde 助理交互。
+        </p>
+      </div>
     </div>
   )
 }
