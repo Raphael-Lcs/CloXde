@@ -26,6 +26,8 @@ interface Entry {
    *  team that produced it. */
   projectId?: string
   conversationId?: string
+  /** Image attachments sent with this message (user messages only). */
+  attachments?: { dataUrl: string }[]
 }
 
 interface Attachment {
@@ -118,11 +120,22 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
   const thoughtLogRef = useRef<HTMLDivElement>(null)
 
   const append = useCallback(
-    (role: Entry['role'], text: string, nav?: { projectId?: string; conversationId?: string }) => {
+    (
+      role: Entry['role'],
+      text: string,
+      nav?: { projectId?: string; conversationId?: string; attachments?: { dataUrl: string }[] }
+    ) => {
       setEntries((curr) => {
         const next = [
           ...curr,
-          { id: localId(), role, text, projectId: nav?.projectId, conversationId: nav?.conversationId }
+          {
+            id: localId(),
+            role,
+            text,
+            projectId: nav?.projectId,
+            conversationId: nav?.conversationId,
+            attachments: nav?.attachments
+          }
         ]
         cachedEntries = next
         return next
@@ -397,8 +410,9 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
 
     setDraft('')
     const pending = attachments.map(({ data, mimeType }) => ({ data, mimeType }))
+    const attachmentsForDisplay = attachments.map(({ dataUrl }) => ({ dataUrl }))
     setAttachments([])
-    append('user', text)
+    append('user', text, { attachments: attachmentsForDisplay })
     setSending(true)
     try {
       const res = await window.api.assistant.sendMessage(text, pending)
@@ -651,6 +665,13 @@ export function AssistantPanel({ onNavigate }: AssistantPanelProps): JSX.Element
                 title={canNav ? '点击查看这个团队' : undefined}
               >
                 {e.text}
+                {e.attachments && e.attachments.length > 0 && (
+                  <div className="assistant-msg-attachments">
+                    {e.attachments.map((att, i) => (
+                      <img key={i} src={att.dataUrl} alt="" className="assistant-msg-attachment-thumb" />
+                    ))}
+                  </div>
+                )}
                 {canNav && <span className="assistant-msg-jump">↗ 打开团队</span>}
               </div>
             )

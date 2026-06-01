@@ -396,6 +396,9 @@ export class AssistantBrain {
       if (signal.attachments) {
         for (const att of signal.attachments) {
           blocks.push({ type: 'image', data: att.data, mimeType: att.mimeType })
+          console.log(
+            `[assistant-brain] attached image: ${att.mimeType}, ${att.data.length} chars base64`
+          )
         }
       }
 
