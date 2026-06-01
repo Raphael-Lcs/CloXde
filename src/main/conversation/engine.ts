@@ -866,8 +866,11 @@ export class ConversationEngine extends EventEmitter {
 
     // Most recent turns on THIS side, oldest-first in the output but selected
     // newest-first against a char budget so we keep the freshest context.
+    // Use listRecentByConversation to avoid loading the entire conversation
+    // history — for a long conversation (thousands of messages), loading all
+    // messages just to filter and reverse-scan is a performance bottleneck.
     const mine = messageRepo
-      .listByConversation(conv.id)
+      .listRecentByConversation(conv.id, 100)
       .filter((m) => m.side === side && (m.role === 'user' || m.role === 'assistant'))
     const recent: string[] = []
     let budget = 6000
