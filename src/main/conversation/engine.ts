@@ -1491,6 +1491,9 @@ export class ConversationEngine extends EventEmitter {
       return
     }
     if (overCap()) return
+    // Cancel old team runtimes BEFORE creating the new task so any in-flight
+    // turn from the old task can't race the new activeTaskId update.
+    await this.cancelTeamRuntimes(slot)
     const newTask = taskRepo.create({
       conversationId: slot.conversation.id,
       brief,
@@ -1504,7 +1507,6 @@ export class ConversationEngine extends EventEmitter {
     slot.conversation =
       conversationRepo.get(slot.conversation.id) ?? slot.conversation
     slot.stallNudges = 0
-    await this.cancelTeamRuntimes(slot)
     bump()
     dispatch('architect', brief, 'pm-handoff')
     this.emitSnapshot(slot)
