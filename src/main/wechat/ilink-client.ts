@@ -31,10 +31,12 @@ export class IlinkClient {
   }
 
   async getBotQrcode(): Promise<{ qrcodeUrl: string; qrcodeId: string }> {
-    const json = await this.requestJson('GET', '/ilink/bot/get_bot_qrcode')
+    const json = await this.requestJson('GET', '/ilink/bot/get_bot_qrcode', {
+      query: { bot_type: 3 }
+    })
     const data = unwrapData(json)
-    const qrcodeUrl = pickString(data, ['qrcodeUrl', 'qrcode_url', 'qrCodeUrl', 'url'])
-    const qrcodeId = pickString(data, ['qrcodeId', 'qrcode_id', 'qrCodeId', 'id'])
+    const qrcodeUrl = pickString(data, ['qrcode_img_content', 'qrcodeUrl', 'qrcode_url', 'qrCodeUrl', 'url'])
+    const qrcodeId = pickString(data, ['qrcode', 'qrcodeId', 'qrcode_id', 'qrCodeId', 'id'])
 
     if (!qrcodeUrl || !qrcodeId) {
       throw new Error(`iLink qrcode response missing qrcodeUrl/qrcodeId: ${compactJson(json)}`)
@@ -189,8 +191,7 @@ export class IlinkClient {
       Accept: 'application/json',
       'Content-Type': 'application/json',
       'X-WECHAT-UIN': makeWechatUin(),
-      bot_agent: BOT_AGENT,
-      bot_type: '0'
+      bot_agent: BOT_AGENT
     }
     if (token) headers.Authorization = `Bearer ${token}`
     return headers
