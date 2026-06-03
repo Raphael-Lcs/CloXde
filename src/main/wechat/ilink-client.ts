@@ -48,7 +48,7 @@ export class IlinkClient {
     qrcodeId: string
   ): Promise<{ status: QrcodeStatus; token?: string; accountId?: string }> {
     const json = await this.requestJson('GET', '/ilink/bot/get_qrcode_status', {
-      query: { qrcode_id: qrcodeId, qrcodeId }
+      query: { qrcode: qrcodeId }
     })
     const data = unwrapData(json)
     const token = pickString(data, ['token', 'accessToken', 'access_token', 'botToken', 'bot_token'])
