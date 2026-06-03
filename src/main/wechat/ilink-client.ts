@@ -47,8 +47,11 @@ export class IlinkClient {
   async pollQrcodeStatus(
     qrcodeId: string
   ): Promise<{ status: QrcodeStatus; token?: string; accountId?: string }> {
+    // iLink 的 get_qrcode_status 是短超时轮询（约30秒返回）
+    // 不要设置短超时，让请求自然完成
     const json = await this.requestJson('GET', '/ilink/bot/get_qrcode_status', {
-      query: { qrcode: qrcodeId }
+      query: { qrcode: qrcodeId },
+      timeoutMs: 35_000 // 35秒超时，略长于服务端的30秒
     })
     const data = unwrapData(json)
     const token = pickString(data, ['token', 'accessToken', 'access_token', 'botToken', 'bot_token'])

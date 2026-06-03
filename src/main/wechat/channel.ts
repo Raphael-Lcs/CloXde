@@ -14,8 +14,7 @@ import {
 } from './credential-store'
 import { ilinkClient, type WeChatMessage } from './ilink-client'
 
-const LOGIN_MAX_ATTEMPTS = 60
-const LOGIN_INTERVAL_MS = 3_000
+const LOGIN_MAX_ATTEMPTS = 10
 const ILINK_TEXT_MAX_LENGTH = 4096
 
 interface ChannelState {
@@ -82,8 +81,10 @@ export async function startLogin(): Promise<{
   const { qrcodeUrl, qrcodeId } = await ilinkClient.getBotQrcode()
 
   const loginPromise = (async (): Promise<{ accountId: string }> => {
+    // iLink 的 get_qrcode_status 每次等待约30秒返回
+    // 需要持续轮询直到成功或超时
     for (let i = 0; i < LOGIN_MAX_ATTEMPTS; i++) {
-      await delay(LOGIN_INTERVAL_MS)
+      console.log(`[wechat] polling attempt ${i + 1}/${LOGIN_MAX_ATTEMPTS}`)
       const { status, token, accountId } = await ilinkClient.pollQrcodeStatus(qrcodeId)
 
       if (status === 'confirmed' && token && accountId) {
