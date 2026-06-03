@@ -31,9 +31,7 @@ export class IlinkClient {
   }
 
   async getBotQrcode(): Promise<{ qrcodeUrl: string; qrcodeId: string }> {
-    const json = await this.requestJson('GET', '/ilink/bot/get_bot_qrcode', {
-      query: { bot_type: 1 }
-    })
+    const json = await this.requestJson('GET', '/ilink/bot/get_bot_qrcode')
     const data = unwrapData(json)
     const qrcodeUrl = pickString(data, ['qrcodeUrl', 'qrcode_url', 'qrCodeUrl', 'url'])
     const qrcodeId = pickString(data, ['qrcodeId', 'qrcode_id', 'qrCodeId', 'id'])
