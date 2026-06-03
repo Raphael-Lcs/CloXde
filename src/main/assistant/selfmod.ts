@@ -19,7 +19,7 @@
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { runGit } from '../fs/git'
-import { getRepoRoot, isSelfModAvailable, getCloxdeDir } from '../paths'
+import { getRepoRoot, isSelfModAvailable } from '../paths'
 import { projectRepo, profileRepo } from '../storage/db'
 import { briefTeam } from './actions'
 import { recordSelfMod } from './selfmod-audit'
@@ -66,7 +66,7 @@ function slug(name: string): string {
  *  normal workspace so they don't mingle with user projects and so the
  *  owned-project review heuristic doesn't pick them up. */
 function worktreesRoot(): string {
-  return join(getCloxdeDir(), 'selfmod-worktrees')
+  return 'D:/.cloxde/selfmod-worktrees'
 }
 
 /** Resolve the current HEAD commit + branch of the live repo. The branch is

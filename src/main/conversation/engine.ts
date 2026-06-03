@@ -1108,16 +1108,19 @@ export class ConversationEngine extends EventEmitter {
           overCap,
           dispatch
         })
+        this.settleStatus(slot)
         return
       }
 
       // ---------- Legacy path (no active task) ---------------------------
       if (side === 'pm') {
+        console.log(`[engine] PM legacy path: activeTask=${!!activeTask} side=${side}`)
         // 3-agent PM but no active task yet — first HANDOFF kicks one off.
         // Same path also fires after a previous task hit DONE/FAIL (we
         // clear activeTaskId on terminal transitions).
         const handoff = extractHandoff(finalText)
         if (!handoff) {
+          console.log(`[engine] PM no HANDOFF, origin=${opts.origin} finalText.length=${finalText.length}`)
           // PM produced no further HANDOFF. Normally a clean stop — PM wrote
           // its reply / wrap-up, then idles. BUT if the PM was just handed a
           // DONE/FAIL [团队反馈] (origin='team-report') and returned an EMPTY
@@ -1143,10 +1146,12 @@ export class ConversationEngine extends EventEmitter {
               slot,
               '团队已结束本轮任务（结论见上方[团队反馈]），但产品经理连续两轮未给出收尾说明。'
             )
+            console.log(`[engine] PM legacy: calling settleStatus (empty report retry)`)
             this.settleStatus(slot)
             return
           }
           slot.pmReportRetried = false
+          console.log(`[engine] PM legacy: calling settleStatus (normal idle)`)
           this.settleStatus(slot)
           return
         }
@@ -1711,7 +1716,14 @@ export class ConversationEngine extends EventEmitter {
    *  never counts itself as busy here. */
   private settleStatus(slot: ActiveConversation): void {
     const busy = this.allSides(slot).some((sr) => sr.streamingMessageId)
-    this.updateConversation(slot, { status: busy ? 'thinking' : 'awaiting-user' })
+    const newStatus = busy ? 'thinking' : 'awaiting-user'
+    // Clear inFlight on all sides so anyBusy() doesn't block assistant review
+    if (!busy) {
+      for (const sr of this.allSides(slot)) {
+        sr.inFlight = Promise.resolve()
+      }
+    }
+    this.updateConversation(slot, { status: newStatus })
   }
 
   /** Re-emit a ConversationView snapshot — picks up busySide for the renderer

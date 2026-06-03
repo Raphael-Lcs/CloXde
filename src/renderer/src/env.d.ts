@@ -126,6 +126,7 @@ interface CloXdeApi {
     setSoul: (content: string) => Promise<IpcResult<true>>
     onReport: (cb: (report: AssistantReport) => void) => Unsubscribe
     onActivity: (cb: (activity: AssistantActivity) => void) => Unsubscribe
+    onProjectCreated: (cb: (payload: { projectId: string }) => void) => Unsubscribe
   }
   wechat: {
     startLogin: () => Promise<IpcResult<{ qrcodeUrl: string }>>

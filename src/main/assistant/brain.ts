@@ -63,6 +63,21 @@ export interface Signal {
 /** What a single think() pass did, for logging/UI. */
 export type ThinkResult = AssistantTurn
 
+/** An empty result — what a preempted background turn returns so none of its
+ *  partial work (directives, prose, REPORT) reaches the user. */
+function emptyResult(): ThinkResult {
+  return {
+    raw: '',
+    dispatched: [],
+    continued: [],
+    remembered: 0,
+    forgotten: 0,
+    updated: 0,
+    scheduled: 0,
+    reports: []
+  }
+}
+
 // The brain runs Claude Code as a normal ACP adapter, but with an empty
 // projectId — it is user-scoped, not project-scoped. cwd is the assistant's
 // workspace so any (read-only) discovery lands somewhere sensible.
@@ -126,6 +141,13 @@ export class AssistantBrain {
    *  almost certainly wedged (a stuck tool). We cancel and surface an error
    *  instead of leaving the UI spinning forever. */
   private static readonly TURN_TIMEOUT_MS = 1_800_000
+  /** Tighter ceiling for BACKGROUND turns (heartbeat / cron / review /
+   *  reflection / instability). These are silent upkeep — nobody is waiting on
+   *  them — so a wedged background turn must NOT hold the single ACP session for
+   *  the full 30-min user budget, blocking the next user message behind it. Five
+   *  minutes is ample for the brain's own maintenance work; past it the turn is
+   *  almost certainly stuck and we cancel it to free the channel. */
+  private static readonly BG_TURN_TIMEOUT_MS = 300_000
   /** After this many turns on one ACP session, compact: drop the session and
    *  reseed a fresh one with the system prompt + a short transcript summary.
    *  The brain is long-lived, so without this its session history grows until
@@ -147,6 +169,12 @@ export class AssistantBrain {
    *  behind an active user conversation (which would drag the machine while the
    *  user is right there using it). */
   private inFlight = 0
+  /** Live handle to the BACKGROUND turn currently holding the ACP session (null
+   *  for a user turn or when idle). An arriving user message flips its
+   *  `preempted` flag and cancels the session, so the background turn bails
+   *  instead of flushing stale upkeep output (a REPORT / dispatch / memory
+   *  write) ahead of — or instead of — the user's answer. */
+  private activeBgTurn: { preempted: boolean } | null = null
   /** Turns run on the CURRENT ACP session (reset on compaction / dispose). */
   private turnsSinceFresh = 0
   /** Rolling tail of recent exchanges, carried across a compaction so the
@@ -274,6 +302,19 @@ export class AssistantBrain {
    *  and executes the directives it emits. Calls are serialized. */
   think(signal: Signal): Promise<ThinkResult> {
     this.inFlight++
+    // A user message takes the channel NOW. There is one ACP session and one
+    // serialized chain, so without this the user's turn would queue behind any
+    // in-flight background upkeep (heartbeat / cron / review / reflection) — for
+    // up to the full turn budget if that upkeep is wedged — and the background
+    // turn's stale output (a REPORT, a dispatch) could even surface as if it
+    // were the answer. Flag the running background turn as preempted and cancel
+    // the session: its prompt settles, the turn sees the flag and bails without
+    // flushing anything, and the chain frees for the user's turn immediately.
+    if (signal.kind === 'user-message' && this.activeBgTurn) {
+      this.activeBgTurn.preempted = true
+      void this.cancel()
+      console.log('[assistant-brain] user message preempted background turn')
+    }
     const run = this.chain.then(() => this.thinkOnce(signal))
     // Keep the chain alive regardless of this call's outcome.
     this.chain = run.catch(() => undefined)
@@ -283,6 +324,21 @@ export class AssistantBrain {
   }
 
   private async thinkOnce(signal: Signal): Promise<ThinkResult> {
+    // Register a background turn so an arriving user message can preempt it
+    // (see think()). User turns are never preempted — they're who we preempt FOR.
+    const turnHandle = signal.kind === 'user-message' ? null : { preempted: false }
+    if (turnHandle) this.activeBgTurn = turnHandle
+    try {
+      return await this.thinkInner(signal, turnHandle)
+    } finally {
+      if (turnHandle && this.activeBgTurn === turnHandle) this.activeBgTurn = null
+    }
+  }
+
+  private async thinkInner(
+    signal: Signal,
+    turnHandle: { preempted: boolean } | null
+  ): Promise<ThinkResult> {
     const memory = getMemoryService()
     // Background maintenance passes (reflection / heartbeat) carry a fixed
     // instruction prompt as their signal text, not a query — so semantic recall on
@@ -366,7 +422,13 @@ export class AssistantBrain {
     if (!compactSummary && restartSeed) compactSummary = restartSeed
 
     this.buffer = ''
-    actions.emitActivity({ phase: 'start' })
+    // Only surface 'start' activity for user turns — background maintenance
+    // (heartbeat / cron / review) is silent upkeep, not work the user needs to
+    // see. If a background turn gets preempted, the user's turn immediately emits
+    // its own 'start' anyway, so skipping background 'start' avoids UI flicker.
+    if (signal.kind === 'user-message') {
+      actions.emitActivity({ phase: 'start' })
+    }
     let reply = ''
     try {
       // Bring the session up FIRST so onSessionReady has run and
@@ -402,20 +464,62 @@ export class AssistantBrain {
         }
       }
 
-      await this.promptWithTimeout(rt, blocks)
+      // User turns get the full budget; background upkeep gets a tighter ceiling
+      // so a wedged maintenance turn can't hold the single ACP session for 30 min
+      // and block the next user message behind it.
+      // IMPORTANT: Mark systemPromptSent BEFORE calling promptWithTimeout, not
+      // after. Once we've constructed the blocks with includeSystem=true and sent
+      // them to the adapter, the system prompt has been "delivered" — even if this
+      // turn gets preempted mid-generation and bails early, the ACP session has
+      // already consumed those blocks. Marking it after would leave the flag stale
+      // when a preempted background turn exits early from the catch block, causing
+      // the next (user) turn to re-send the system prompt and produce a malformed
+      // / duplicate prompt that the API rejects with "Invalid 'signature'" errors.
       if (includeSystem) this.systemPromptSent = true
-      // Every turn (incl. background review/reflection) grows the ACP session,
-      // so all count toward compaction.
+      // Similarly, increment turnsSinceFresh BEFORE the prompt: once we send blocks
+      // to the adapter, the ACP session has grown by one turn regardless of whether
+      // this turn completes or gets preempted. Deferring the increment until after
+      // would undercount preempted turns and delay compaction, risking context
+      // overflow on a long-running session with frequent background interruptions.
       this.turnsSinceFresh++
-      // …but only a real user exchange counts as "new conversation" — otherwise
+      await this.promptWithTimeout(
+        rt,
+        blocks,
+        signal.kind === 'user-message'
+          ? AssistantBrain.TURN_TIMEOUT_MS
+          : AssistantBrain.BG_TURN_TIMEOUT_MS
+      )
+      // Only a real user exchange counts as "new conversation" — otherwise
       // the reflection gate (turnCount delta) would be satisfied by review and
       // reflection turns themselves, making reflection self-perpetuate every
       // interval with no actual user activity.
       if (signal.kind === 'user-message') this.turnsTotal++
     } catch (e) {
+      // A user message preempted this background turn: we cancelled the session
+      // on purpose, so the prompt's rejection is expected, not a failure. Swallow
+      // it — no 'error' activity, no throw — and discard the partial output.
+      // Emit 'done' so the UI knows this (background) turn finished, even though
+      // it was cut short. The queued user turn will emit its own 'start' next.
+      if (turnHandle?.preempted) {
+        console.log(`[assistant-brain] ${signal.kind} preempted during prompt (catch block)`)
+        actions.emitActivity({ phase: 'done' })
+        return emptyResult()
+      }
       actions.emitActivity({ phase: 'error', text: (e as Error).message })
       throw e
     }
+
+    // Preempted AFTER the prompt settled (cancel raced the completion). Discard
+    // everything this background turn produced: do NOT run its directives (no
+    // stale REPORT surfacing as the answer, no dispatch, no memory write) and do
+    // NOT record it. The user's turn is queued right behind us and emits its own
+    // 'start' immediately. Emit 'done' to clear any lingering UI state.
+    if (turnHandle?.preempted) {
+      console.log(`[assistant-brain] ${signal.kind} preempted after prompt settled`)
+      actions.emitActivity({ phase: 'done' })
+      return emptyResult()
+    }
+
     const raw = this.buffer.trim()
 
     // executeDirectives can do real, slow work (a DISPATCH kicks off a team
@@ -432,16 +536,21 @@ export class AssistantBrain {
     return result
   }
 
-  /** Race the ACP turn against TURN_TIMEOUT_MS. On timeout we cancel the
-   *  in-flight turn (so the adapter stops working) and throw, breaking an
-   *  otherwise-infinite "thinking…" stall. */
-  private async promptWithTimeout(rt: AcpRuntime, blocks: ContentBlock[]): Promise<void> {
+  /** Race the ACP turn against a caller-supplied timeout. On timeout we cancel
+   *  the in-flight turn (so the adapter stops working) and throw, breaking an
+   *  otherwise-infinite "thinking…" stall. User turns pass the full budget;
+   *  background upkeep passes the tighter BG ceiling. */
+  private async promptWithTimeout(
+    rt: AcpRuntime,
+    blocks: ContentBlock[],
+    timeoutMs: number
+  ): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         void rt.cancel()
         reject(new Error('助理这一轮超时了（可能在反复尝试被拦截的操作），已中断'))
-      }, AssistantBrain.TURN_TIMEOUT_MS)
+      }, timeoutMs)
     })
     try {
       await Promise.race([rt.prompt(blocks), timeout])

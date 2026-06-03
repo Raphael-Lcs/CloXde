@@ -146,6 +146,11 @@ export function registerIpcHandlers(): void {
     broadcast(IPC.AssistantActivityEvent, activity)
   })
 
+  // Project creation notification → renderer, so the UI can refresh its project list
+  assistantBus.on('project-created', (payload: { projectId: string }) => {
+    broadcast(IPC.AssistantProjectCreatedEvent, payload)
+  })
+
   // --- App ---------------------------------------------------------------
   ipcMain.handle(IPC.AppGetVersion, () => ok(app.getVersion()))
 

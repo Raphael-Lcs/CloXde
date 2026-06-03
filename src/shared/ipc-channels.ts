@@ -56,6 +56,7 @@ export const IPC = {
   AssistantSetSoul: 'assistant:set-soul', // write the editable persona (SOUL.md)
   AssistantReportEvent: 'assistant:report', // main → renderer, proactive AssistantReport
   AssistantActivityEvent: 'assistant:activity', // main → renderer, live turn progress (AssistantActivity)
+  AssistantProjectCreatedEvent: 'assistant:project-created', // main → renderer, notify UI to refresh projects
 
   // WeChat channel
   WeChatStartLogin: 'wechat:start-login',

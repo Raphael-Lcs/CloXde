@@ -110,6 +110,8 @@ export async function dispatchProject(
     executorKind: input.executorKind,
     pmKind: input.pmKind
   })
+  // Notify UI that a new project was created so it can refresh its project list
+  assistantBus.emit('project-created', { projectId: project.id })
   return { project, conversation }
 }
 

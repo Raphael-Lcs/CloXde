@@ -199,7 +199,9 @@ const api = {
     onReport: (cb: (report: AssistantReport) => void): Unsubscribe =>
       on<AssistantReport>(IPC.AssistantReportEvent, cb),
     onActivity: (cb: (activity: AssistantActivity) => void): Unsubscribe =>
-      on<AssistantActivity>(IPC.AssistantActivityEvent, cb)
+      on<AssistantActivity>(IPC.AssistantActivityEvent, cb),
+    onProjectCreated: (cb: (payload: { projectId: string }) => void): Unsubscribe =>
+      on<{ projectId: string }>(IPC.AssistantProjectCreatedEvent, cb)
   },
   wechat: {
     startLogin: (): Promise<IpcResult<{ qrcodeUrl: string }>> =>

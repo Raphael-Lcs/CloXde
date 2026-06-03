@@ -6,7 +6,8 @@ import type {
   AssistantReport,
   MemoryKind,
   Project,
-  Conversation
+  Conversation,
+  Task
 } from '@shared/types'
 import { isAssistantSoundEnabled, playAssistantChime } from '../lib/sound'
 
@@ -23,6 +24,11 @@ interface AssistantPanelProps {
   projects: Project[]
   /** Conversations by project for displaying team status. */
   conversationsByProject: Record<string, Conversation[]>
+}
+
+type ActiveConversation = Conversation & {
+  busySide?: 'pm' | 'architect' | 'executor' | null
+  activeTask?: Task
 }
 
 interface Entry {
@@ -673,50 +679,18 @@ export function AssistantPanel({ onNavigate, projects, conversationsByProject }:
         <div className="assistant-status-bar">
           {activeTeams.map(({ project, conversation }) => {
             const isThinking = conversation.status === 'thinking'
-            const busySide = conversation.busySide || 'pm'
-            const roleIcon = busySide === 'pm' ? '📋' : busySide === 'architect' ? '🏗️' : '⚙️'
-
-            // Calculate progress - show even if no plan
-            let progress = 0
-            let progressLabel = ''
-
-            if (conversation.activeTask) {
-              const task = conversation.activeTask
-              if (task.plan && task.plan.length > 0) {
-                const completed = task.plan.filter(s => s.status === 'completed').length
-                const total = task.plan.length
-                progress = total > 0 ? (completed / total) * 100 : 0
-                progressLabel = `${completed}/${total}`
-              } else {
-                // No plan yet, show status-based progress
-                const statusProgress = {
-                  briefing: 10,
-                  planning: 25,
-                  executing: 50,
-                  review: 75,
-                  done: 100,
-                  failed: 0
-                }
-                progress = statusProgress[task.status] || 0
-                progressLabel = task.status === 'planning' ? '规划' :
-                               task.status === 'executing' ? '执行' :
-                               task.status === 'review' ? '审查' : '进行中'
-              }
-            }
+            const statusText = isThinking ? '工作中' : '等待输入'
+            const statusIcon = isThinking ? '⚙️' : '⏸️'
 
             return (
               <div
                 key={project.id}
                 className="status-bar-item"
                 onClick={() => onNavigate(project.id, conversation.id)}
-                title={`${project.name} - ${isThinking ? '工作中' : '等待输入'}${progressLabel ? ` (${progressLabel})` : ''}`}
+                title={`${project.name} - ${statusText}\n点击查看详情`}
               >
-                <span className="status-bar-icon">{roleIcon}</span>
+                <span className="status-bar-icon">{statusIcon}</span>
                 <span className="status-bar-name">{project.name}</span>
-                <div className="status-bar-progress">
-                  <div className="status-bar-progress-fill" style={{ width: `${progress}%` }} />
-                </div>
-                {progressLabel && <span className="status-bar-progress-label">{progressLabel}</span>}
                 <span className={`status-bar-pulse ${isThinking ? 'active' : ''}`} />
               </div>
             )

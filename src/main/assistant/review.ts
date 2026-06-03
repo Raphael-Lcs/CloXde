@@ -131,7 +131,12 @@ let settleListener: ((view: ConversationView) => void) | null = null
  *  ignore settle events from projects the user opened by hand. */
 function isOwnedProject(projectId: string): boolean {
   const p = projectRepo.get(projectId)
-  return !!p && p.rootDir.startsWith(join(getWorkspaceDir()))
+  if (!p) return false
+  const workspace = join(getWorkspaceDir())
+  // Normalize both paths for reliable comparison on Windows (handles mixed separators, case)
+  const normalizedRoot = p.rootDir.toLowerCase().replace(/\\/g, '/')
+  const normalizedWorkspace = workspace.toLowerCase().replace(/\\/g, '/')
+  return normalizedRoot.startsWith(normalizedWorkspace)
 }
 
 /** Schedule a gated review pass shortly. Debounced: rapid settles collapse into
@@ -204,8 +209,9 @@ function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | 
       .filter(Boolean)
       .join('\n')
     const flag = needsAttention ? ' ⚠️卡住·待你决策' : ''
+    const canContinue = conv.status === 'ended' || conv.status === 'awaiting-user' ? '【可用 <<CONTINUE>> 继续】' : ''
     sections.push(
-      `# 项目「${project.name}」(状态 ${conv.status}, 会话ID ${conv.id})${flag}\n${lines || '  （无文本消息）'}`
+      `# 项目「${project.name}」(路径 ${project.rootDir}, 状态 ${conv.status}, 会话ID ${conv.id})${flag}${canContinue}\n${lines || '  （无文本消息）'}`
     )
   }
   // Return null only if there's truly nothing: no teams at all, OR all teams are
@@ -493,9 +499,21 @@ async function runPass(
     const intro = snapshot.stuck
       ? '注意：下面带 ⚠️ 的团队已经卡住、在等你决策（自动模式下停在 awaiting-user 通常意味着引擎遇到协议违例/崩溃/受阻而非正常完成）。请优先处理它们。'
       : '以下是你派出的团队的最新进展，请验收并决定下一步：'
+
+    const instructions = `
+【重要原则：根据文件夹路径判断用 CONTINUE 还是 DISPATCH】
+- 用户要修改的文件在**上面某个项目的文件夹（rootDir）里** → 用 <<CONTINUE>>{"conversationId":"那个项目的会话ID","message":"补充要求"}<</CONTINUE>>
+- 用户要修改的文件在**新的/不同的文件夹**里 → 用 <<DISPATCH>> 创建新项目
+- **不要串台**：不要用 <<CONTINUE>> 让一个项目的团队去改另一个文件夹的代码
+
+【验收团队成果】
+- 团队做成了不显然的活（趟通流程、找到正确做法），提炼成技能：<<REMEMBER>>{"kind":"skill","content":"怎么做"}<</REMEMBER>>
+- 有值得告知用户的就 <<REPORT>>
+`
+
     await think({
       kind: snapshot.stuck ? 'capability-gap' : 'review',
-      text: `${intro}\n- 想推动某个**已存在**的团队继续干（补充要求、纠偏、回答它的问题），用 <<CONTINUE>>{"conversationId":"上面给的会话ID","message":"要对团队说的话"}<</CONTINUE>>。\n- 只有需要**全新**项目时才 <<DISPATCH>>。\n- 如果某个团队把一件不显然的活做成了（趟通了流程、找到了正确做法），把"怎么做成的"提炼成一条可复用技能：<<REMEMBER>>{"kind":"skill","content":"在什么情况下、按什么步骤、注意什么"}<</REMEMBER>>，让下次少走弯路。\n- 有值得告知用户的就 <<REPORT>>。\n\n${snapshot.text}`
+      text: `${intro}\n${instructions}\n${snapshot.text}`
     })
     lastReviewedTs = snapshot.newestTs
   } catch (e) {
@@ -515,6 +533,7 @@ export function startAssistantReview(opts?: {
   intervalMs?: number
 }): void {
   if (timer) return
+
   const anyBusy = opts?.anyBusy ?? (() => conversationEngine.anyBusy())
   const think = opts?.think ?? ((s: Signal) => getAssistantBrain().think(s))
   const brainBusy = opts?.brainBusy ?? (() => getAssistantBrain().isBusy())
@@ -542,9 +561,24 @@ export function startAssistantReview(opts?: {
   // not the per-round trigger rule #1 forbids.
   liveDeps = { anyBusy, think, brainBusy, turnCount }
   settleListener = (view) => {
-    if (view.status !== 'ended' && view.status !== 'awaiting-user') return
-    if (!isOwnedProject(view.projectId)) return
-    requestReviewSoon()
+    // Primary trigger: conversation settled to ended or awaiting-user
+    // IMPORTANT: Re-fetch from DB to ensure we have the latest status, since
+    // emitSnapshot may be called multiple times during a turn and we might
+    // receive stale status in the event.
+    const freshConv = conversationRepo.get(view.id)
+    if (!freshConv) return
+    const settled = freshConv.status === 'ended' || freshConv.status === 'awaiting-user'
+    if (settled && isOwnedProject(view.projectId)) {
+      requestReviewSoon()
+      return
+    }
+    // Fallback: if status is 'thinking' but the conversation hasn't had new
+    // messages in a while, it might be stuck (streaming not properly closed).
+    // Trigger a review to unstick it. This is a safety net for the case where
+    // settleStatus doesn't transition to awaiting-user due to lingering state.
+    // We don't check message timestamps here because that would require a DB
+    // query on every update event, which is too expensive. The periodic 5-min
+    // review will catch these cases anyway.
   }
   conversationEngine.on('conversation-updated', settleListener)
 }

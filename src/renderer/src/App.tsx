@@ -425,6 +425,14 @@ export function App(): JSX.Element {
     })
   }, [])
 
+  // Refresh projects when assistant creates a new one
+  useEffect(() => {
+    if (!window.api.assistant?.onProjectCreated) return
+    return window.api.assistant.onProjectCreated(() => {
+      void refreshProjects()
+    })
+  }, [refreshProjects])
+
   // Opening the panel marks reports seen — clear the badge and persist it.
   const openAssistant = useCallback((open: boolean) => {
     setAssistantOpen(open)
@@ -436,11 +444,15 @@ export function App(): JSX.Element {
 
   // Navigation from the assistant panel into a dispatched/continued team.
   const navigateFromAssistant = useCallback(
-    (projectId: string, convId: string) => {
+    async (projectId: string, convId: string) => {
       setAssistantOpen(false)
+      // Refresh projects first in case the assistant just created a new one
+      await refreshProjects()
       void jumpToConversation(projectId, convId)
+      // Auto-open team panel when navigating from assistant
+      setRightPanels((list) => (list.includes('team') ? list : [...list, 'team']))
     },
-    [jumpToConversation]
+    [jumpToConversation, refreshProjects]
   )
 
   // Conversations (across all loaded projects) currently waiting on the user.
@@ -736,20 +748,24 @@ export function App(): JSX.Element {
           />
         )}
         <main className="main">
-          {assistantOpen ? (
+          {/* Keep AssistantPanel mounted even when hidden to preserve streaming state */}
+          <div style={{ display: assistantOpen ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
             <AssistantPanel
               onNavigate={navigateFromAssistant}
               projects={projects}
               conversationsByProject={conversationsByProject}
             />
-          ) : !activeProject ? (
+          </div>
+          {!assistantOpen && !activeProject && (
             <EmptyHero onOpen={() => void handleOpenFolder()} />
-          ) : !conversation ? (
+          )}
+          {!assistantOpen && activeProject && !conversation && (
             <EmptyProject
               project={activeProject}
               onNew={() => void handleNewConversation(activeProject.id)}
             />
-          ) : (
+          )}
+          {!assistantOpen && activeProject && conversation && (
             <>
               <div className="conv-pair-header">
                 {conversation.pm ? (
