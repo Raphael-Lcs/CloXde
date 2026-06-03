@@ -31,9 +31,7 @@ export class IlinkClient {
   }
 
   async getBotQrcode(): Promise<{ qrcodeUrl: string; qrcodeId: string }> {
-    const json = await this.requestJson('GET', '/ilink/bot/get_bot_qrcode', {
-      query: { bot_type: 0 }
-    })
+    const json = await this.requestJson('GET', '/ilink/bot/get_bot_qrcode')
     const data = unwrapData(json)
     const qrcodeUrl = pickString(data, ['qrcodeUrl', 'qrcode_url', 'qrCodeUrl', 'url'])
     const qrcodeId = pickString(data, ['qrcodeId', 'qrcode_id', 'qrCodeId', 'id'])
@@ -191,7 +189,8 @@ export class IlinkClient {
       Accept: 'application/json',
       'Content-Type': 'application/json',
       'X-WECHAT-UIN': makeWechatUin(),
-      bot_agent: BOT_AGENT
+      bot_agent: BOT_AGENT,
+      bot_type: '0'
     }
     if (token) headers.Authorization = `Bearer ${token}`
     return headers
