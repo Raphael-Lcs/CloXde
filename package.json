@@ -14,7 +14,7 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "tsx scripts/test-state-machine.ts && tsx scripts/test-transcript.ts && tsx scripts/test-update-reducer.ts && tsx scripts/test-scheduler.ts && tsx scripts/test-directives.ts && tsx scripts/test-reflection-gate.ts && tsx scripts/test-memory-score.ts && tsx scripts/test-instability-gate.ts && tsx scripts/test-history-query.ts && tsx scripts/test-gates.ts",
+    "test": "tsx scripts/test-state-machine.ts && tsx scripts/test-transcript.ts && tsx scripts/test-update-reducer.ts && tsx scripts/test-scheduler.ts && tsx scripts/test-directives.ts && tsx scripts/test-reflection-gate.ts && tsx scripts/test-memory-score.ts && tsx scripts/test-instability-gate.ts && tsx scripts/test-history-query.ts && tsx scripts/test-gates.ts && tsx scripts/test-review-gate.ts",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "icon": "node scripts/build-icon.cjs",
     "shortcut": "node scripts/build-icon.cjs && powershell -ExecutionPolicy Bypass -File scripts/install-shortcut.ps1"

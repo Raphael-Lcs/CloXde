@@ -474,8 +474,19 @@ async function runPass(
 ): Promise<void> {
   maybePrune() // cheap, model-free — run regardless of the quiet-window gate
   if (running) return // a slow brain pass must not overlap the next tick
-  if (anyBusy()) return // quiet-window gate: never run the brain while a team works
-  if (brainBusy()) return // …or while the user is mid-conversation with it
+  if (brainBusy()) return // don't interrupt the user's conversation with the assistant
+  // CRITICAL FIX: Don't gate on anyBusy() for capability-gap (stuck team) scenarios.
+  // The old design blocked ALL review when ANY team was busy, causing stuck teams
+  // to wait minutes instead of getting immediate help. New logic: check snapshot
+  // first, and only apply the quiet-window gate to routine review, NOT to urgent
+  // stuck-team intervention. A stuck team (autopilot + awaiting-user) is highest
+  // priority and must bypass the gate — the brain can respond in parallel with
+  // other running teams without dragging performance (it's one turn, not continuous).
+  const snapshot = gatherSnapshot()
+  // Apply quiet-window gate ONLY to non-urgent passes (reflection, heartbeat, routine review).
+  // Stuck teams bypass this — they need immediate intervention regardless of other activity.
+  const isUrgent = snapshot?.stuck ?? false
+  if (!isUrgent && anyBusy()) return
   running = true
   try {
     // Reflection and team-review both spend a brain turn; run at most one per
@@ -485,10 +496,7 @@ async function runPass(
     if (await maybeReportInstability(think)) return
     if (await maybeFireReminders(think)) return
     if (await maybeReflect(think, turnCount)) return
-    const snapshot = gatherSnapshot()
-    // No NEW team activity to review — fall through to the silent maintenance
-    // heartbeat (rate-limited, often a no-op). This is the only path that runs the
-    // brain on a genuinely idle machine, so it's where "breathing" lives.
+    // snapshot already gathered above for the gate check
     if (!snapshot) {
       await maybeHeartbeat(think)
       return
