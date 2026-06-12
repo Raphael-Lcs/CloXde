@@ -136,6 +136,9 @@ export interface Conversation {
   /** Path-C: id of the currently active task driving this conversation,
    *  if any. NULL = legacy free-form mode (engine falls back to tag scan). */
   activeTaskId?: string
+  /** How many times the assistant has sent CONTINUE to this stuck team. Reset when
+   *  the team unsticks or the user intervenes. Used to avoid infinite retry loops. */
+  assistantNudgeCount: number
   createdAt: number
   endedAt?: number
   archivedAt?: number

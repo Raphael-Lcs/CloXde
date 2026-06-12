@@ -399,6 +399,20 @@ const MIGRATIONS: Migration[] = [
         ALTER TABLE tasks ADD COLUMN review_cycles INTEGER NOT NULL DEFAULT 0;
       `)
     }
+  },
+  {
+    version: 16,
+    name: 'assistant-nudge-budget',
+    up(db) {
+      // Track how many times the assistant has sent CONTINUE to a stuck team.
+      // When this exceeds a threshold (e.g. 3), the assistant should REPORT to
+      // the user instead of retrying infinitely. Reset when the team unsticks
+      // (status != awaiting-user) or when the user manually intervenes.
+      db.exec(`
+        ALTER TABLE conversations
+          ADD COLUMN assistant_nudge_count INTEGER NOT NULL DEFAULT 0;
+      `)
+    }
   }
 ]
 

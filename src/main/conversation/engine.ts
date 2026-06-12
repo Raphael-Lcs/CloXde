@@ -477,6 +477,13 @@ export class ConversationEngine extends EventEmitter {
     // fresh budget of nudges before we idle on it again.
     slot.stallNudges = 0
     slot.pmReportRetried = false
+    // Reset the assistant nudge counter when the user manually intervenes (sends a
+    // message with preempt=true). This signals that the team is no longer stuck in
+    // the same state the assistant was trying to fix — the user's input changes the
+    // context, so the assistant gets a fresh retry budget if the team gets stuck again.
+    if (preempt && slot.conversation.assistantNudgeCount > 0) {
+      this.updateConversation(slot, { assistantNudgeCount: 0 })
+    }
 
     // NOTE: we deliberately do NOT reset autoTurnsUsed here. The cap exists
     // to bound a single autopilot cascade — a chatty user shouldn't be able
@@ -1723,7 +1730,16 @@ export class ConversationEngine extends EventEmitter {
         sr.inFlight = Promise.resolve()
       }
     }
-    this.updateConversation(slot, { status: newStatus })
+    // Reset assistant nudge counter when the team unsticks (transitions away from
+    // awaiting-user). The counter tracks failed CONTINUE attempts; a successful
+    // unstick means the team is no longer stuck, so we reset the budget.
+    const wasStuck = slot.conversation.status === 'awaiting-user'
+    const nowUnstuck = newStatus !== 'awaiting-user'
+    if (wasStuck && nowUnstuck) {
+      this.updateConversation(slot, { status: newStatus, assistantNudgeCount: 0 })
+    } else {
+      this.updateConversation(slot, { status: newStatus })
+    }
   }
 
   /** Re-emit a ConversationView snapshot — picks up busySide for the renderer

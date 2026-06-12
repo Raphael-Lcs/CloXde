@@ -38,9 +38,11 @@ type TurnCountFn = () => number
 
 const REVIEW_INTERVAL_MS = 5 * 60 * 1000
 // In 3-agent mode, PM wraps the architect+executor dialog, so the final PM
-// summary may be buried under many team turns. We need enough messages to
-// capture the PM's acceptance report, not just the last few executor lines.
+// summary may be buried under many team turns. We take more messages when a PM
+// exists to ensure we capture the acceptance report, not just the last few
+// executor lines. In 2-agent mode (no PM), 20 is enough.
 const MESSAGES_PER_CONV = 20
+const MESSAGES_PER_CONV_WITH_PM = 30
 /** How often the decay pass runs. Memory is otherwise append-only, so without
  *  this it grows unbounded — stale, low-confidence, unpinned memories never
  *  leave. Daily is plenty: pruning is cheap and the staleness window is 30d. */
@@ -100,8 +102,10 @@ let lastPrunedAt = 0
  *  'conversation-updated'; we wait this long before running a pass so a burst of
  *  near-simultaneous settles (or a momentary settle during an autopilot handoff
  *  that immediately resumes) collapses into at most one wake, and a team that
- *  resumes within the window is caught by the quiet-window gate as a no-op. */
-const NUDGE_DEBOUNCE_MS = 5000
+ *  resumes within the window is caught by the quiet-window gate as a no-op.
+ *  Reduced from 5s to 2s for faster user-perceived response while still filtering
+ *  transient state transitions. */
+const NUDGE_DEBOUNCE_MS = 2000
 /** When the last reflection pass ran, and the brain's turn count at that time.
  *  Together they gate reflection: at most once per interval, and only if the
  *  brain has had new turns since (otherwise there's nothing new to distill). */
@@ -173,17 +177,31 @@ function renderMessageText(m: Message): string {
  *  waiting for intervention — under autopilot, status 'awaiting-user' means the
  *  engine halted (protocol slip / crash / blocked) rather than finished, since a
  *  completed autopilot run settles to 'ended'. That's a capability-gap the brain
- *  should prioritize. Returns null when there's nothing to review. */
-function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | null {
+ *  should prioritize. Returns null when there's nothing to review.
+ *  Also surfaces `exhausted`: true when at least one stuck team has exceeded the
+ *  assistant nudge budget (been CONTINUE'd too many times without unsticking),
+ *  prompting the brain to REPORT to the user instead of retrying. */
+function gatherSnapshot(): {
+  text: string
+  newestTs: number
+  stuck: boolean
+  exhausted: boolean
+} | null {
   const sections: string[] = []
   let newestTs = 0
   let stuck = false
+  let exhausted = false
   let hasSettled = false // at least one team is ended or awaiting-user
+  const NUDGE_BUDGET = 3 // max CONTINUE attempts before escalating to user
   for (const project of ownedProjects()) {
     const convs = conversationRepo.listByProject(project.id)
     if (convs.length === 0) continue
     const conv = convs[0] // listByProject is created_at DESC → most recent first
-    const allMsgs = messageRepo.listRecentByConversation(conv.id, MESSAGES_PER_CONV)
+    // Dynamically choose message count: more when PM exists (30) to capture the
+    // PM's acceptance report buried under architect+executor exchanges, fewer (20)
+    // in 2-agent mode where the architect reports directly.
+    const msgCount = conv.pmProfileId ? MESSAGES_PER_CONV_WITH_PM : MESSAGES_PER_CONV
+    const allMsgs = messageRepo.listRecentByConversation(conv.id, msgCount)
     if (allMsgs.length === 0) continue
 
     // In 3-agent mode, the PM is the one who reports to the assistant. Filter to
@@ -195,7 +213,11 @@ function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | 
     const convNewest = allMsgs[allMsgs.length - 1].ts
     if (convNewest > newestTs) newestTs = convNewest
     const needsAttention = conv.autopilot && conv.status === 'awaiting-user'
-    if (needsAttention) stuck = true
+    if (needsAttention) {
+      stuck = true
+      // Check if the assistant has exceeded the nudge budget for this team
+      if (conv.assistantNudgeCount >= NUDGE_BUDGET) exhausted = true
+    }
     // A team that just settled (ended or awaiting-user) is "new activity" even if
     // its last message ts hasn't changed — the state transition itself is worth
     // reviewing. This fixes the bug where a team finishes but the assistant never
@@ -208,7 +230,11 @@ function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | 
       })
       .filter(Boolean)
       .join('\n')
-    const flag = needsAttention ? ' ⚠️卡住·待你决策' : ''
+    const nudgeInfo =
+      needsAttention && conv.assistantNudgeCount > 0
+        ? ` (已尝试 ${conv.assistantNudgeCount}/${NUDGE_BUDGET} 次)`
+        : ''
+    const flag = needsAttention ? ` ⚠️卡住·待你决策${nudgeInfo}` : ''
     const canContinue = conv.status === 'ended' || conv.status === 'awaiting-user' ? '【可用 <<CONTINUE>> 继续】' : ''
     sections.push(
       `# 项目「${project.name}」(路径 ${project.rootDir}, 状态 ${conv.status}, 会话ID ${conv.id})${flag}${canContinue}\n${lines || '  （无文本消息）'}`
@@ -219,7 +245,7 @@ function gatherSnapshot(): { text: string; newestTs: number; stuck: boolean } | 
   // awaiting-user) always triggers a review, even if its last message is old.
   if (sections.length === 0) return null
   if (!hasSettled && newestTs <= lastReviewedTs) return null
-  return { text: sections.join('\n\n'), newestTs, stuck }
+  return { text: sections.join('\n\n'), newestTs, stuck, exhausted }
 }
 
 /** Run the memory decay pass at most once per PRUNE_INTERVAL_MS. Pure DB work
@@ -505,7 +531,9 @@ async function runPass(
     // treat as "needs a decision now", not a routine progress check — classify
     // the signal so the prompt can bias toward CONTINUE / intervention.
     const intro = snapshot.stuck
-      ? '注意：下面带 ⚠️ 的团队已经卡住、在等你决策（自动模式下停在 awaiting-user 通常意味着引擎遇到协议违例/崩溃/受阻而非正常完成）。请优先处理它们。'
+      ? snapshot.exhausted
+        ? '⚠️ 警告：下面带 ⚠️ 的团队已经卡住很久，你已经尝试过多次 <<CONTINUE>> 推它但没救回来。现在**不要再尝试 CONTINUE**，改用 <<REPORT>> 如实告诉用户哪个团队卡死了、卡在哪、已经试过几次、可能需要用户介入或手动检查。'
+        : '注意：下面带 ⚠️ 的团队已经卡住、在等你决策（自动模式下停在 awaiting-user 通常意味着引擎遇到协议违例/崩溃/受阻而非正常完成）。优先处理它们。'
       : '以下是你派出的团队的最新进展，请验收并决定下一步：'
 
     const instructions = `

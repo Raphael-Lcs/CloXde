@@ -144,6 +144,15 @@ export async function continueTeam(input: {
   await conversationEngine.sendUserMessage(conv.id, input.message, undefined, undefined, {
     preempt: false
   })
+  // Increment the assistant nudge counter after sending CONTINUE. This tracks how
+  // many times the assistant has tried to unstick this team. Reset happens in the
+  // engine when the team unsticks (status != awaiting-user) or when the user
+  // manually intervenes (sendUserMessage with preempt=true).
+  if (conv.status === 'awaiting-user') {
+    conversationRepo.patch(conv.id, {
+      assistantNudgeCount: conv.assistantNudgeCount + 1
+    })
+  }
   const project = projectRepo.get(conv.projectId)
   return {
     name: project?.name ?? conv.title ?? '未命名团队',

@@ -340,6 +340,7 @@ interface ConversationRow {
   executor_acp_session_id: string | null
   inherited_summary: string | null
   active_task_id: string | null
+  assistant_nudge_count: number
   created_at: number
   ended_at: number | null
   archived_at: number | null
@@ -364,6 +365,7 @@ function rowToConversation(row: ConversationRow, parentIds: string[]): Conversat
     parentIds,
     inheritedSummary: row.inherited_summary ?? undefined,
     activeTaskId: row.active_task_id ?? undefined,
+    assistantNudgeCount: row.assistant_nudge_count,
     createdAt: row.created_at,
     endedAt: row.ended_at ?? undefined,
     archivedAt: row.archived_at ?? undefined
@@ -374,7 +376,7 @@ const CONVERSATION_COLUMNS = `id, project_id, title, pm_profile_id,
   architect_profile_id, executor_profile_id,
   primary_side, status, autopilot, max_auto_turns, auto_turns_used,
   pm_acp_session_id, architect_acp_session_id, executor_acp_session_id,
-  inherited_summary, active_task_id, created_at, ended_at, archived_at`
+  inherited_summary, active_task_id, assistant_nudge_count, created_at, ended_at, archived_at`
 
 /** Bulk-load parent ids for a set of conversations, ordered by `ord` then
  *  insertion. Returns a map (childId -> parentId[]). */
@@ -463,6 +465,7 @@ export const conversationRepo = {
       autoTurnsUsed: 0,
       parentIds,
       inheritedSummary: input.inheritedSummary,
+      assistantNudgeCount: 0,
       createdAt: now
     }
     const db = getDb()
@@ -508,6 +511,7 @@ export const conversationRepo = {
       architectAcpSessionId?: string | null
       executorAcpSessionId?: string | null
       activeTaskId?: string | null
+      assistantNudgeCount?: number
       endedAt?: number | null
     }
   ): void {
@@ -522,6 +526,7 @@ export const conversationRepo = {
     if (patch.architectAcpSessionId !== undefined) { fields.push('architect_acp_session_id = ?'); values.push(patch.architectAcpSessionId) }
     if (patch.executorAcpSessionId !== undefined) { fields.push('executor_acp_session_id = ?'); values.push(patch.executorAcpSessionId) }
     if (patch.activeTaskId !== undefined) { fields.push('active_task_id = ?'); values.push(patch.activeTaskId) }
+    if (patch.assistantNudgeCount !== undefined) { fields.push('assistant_nudge_count = ?'); values.push(patch.assistantNudgeCount) }
     if (patch.endedAt !== undefined) { fields.push('ended_at = ?'); values.push(patch.endedAt) }
     if (fields.length === 0) return
     values.push(id)
