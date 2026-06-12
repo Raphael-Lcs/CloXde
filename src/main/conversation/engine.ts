@@ -482,6 +482,9 @@ export class ConversationEngine extends EventEmitter {
     // the same state the assistant was trying to fix — the user's input changes the
     // context, so the assistant gets a fresh retry budget if the team gets stuck again.
     if (preempt && slot.conversation.assistantNudgeCount > 0) {
+      console.log(
+        `[engine] user intervened in ${conversationId.slice(0, 8)}, reset nudge count: ${slot.conversation.assistantNudgeCount} → 0`
+      )
       this.updateConversation(slot, { assistantNudgeCount: 0 })
     }
 
@@ -1736,6 +1739,9 @@ export class ConversationEngine extends EventEmitter {
     const wasStuck = slot.conversation.status === 'awaiting-user'
     const nowUnstuck = newStatus !== 'awaiting-user'
     if (wasStuck && nowUnstuck) {
+      console.log(
+        `[engine] team ${slot.conversation.id.slice(0, 8)} unstuck (${slot.conversation.status} → ${newStatus}), reset nudge count: ${slot.conversation.assistantNudgeCount} → 0`
+      )
       this.updateConversation(slot, { status: newStatus, assistantNudgeCount: 0 })
     } else {
       this.updateConversation(slot, { status: newStatus })

@@ -192,7 +192,13 @@ function gatherSnapshot(): {
   let stuck = false
   let exhausted = false
   let hasSettled = false // at least one team is ended or awaiting-user
-  const NUDGE_BUDGET = 3 // max CONTINUE attempts before escalating to user
+  // Nudge budget: how many CONTINUE attempts before escalating to user.
+  // Default is 3 for capability-gap (protocol violations, crashes).
+  // Instability (adapter底座 crashes) gets 5 because it's often transient.
+  // We detect instability by checking if the last few messages contain
+  // error/crash keywords (heuristic, not perfect, but simple).
+  const NUDGE_BUDGET_DEFAULT = 3
+  const NUDGE_BUDGET_INSTABILITY = 5
   for (const project of ownedProjects()) {
     const convs = conversationRepo.listByProject(project.id)
     if (convs.length === 0) continue
@@ -215,8 +221,27 @@ function gatherSnapshot(): {
     const needsAttention = conv.autopilot && conv.status === 'awaiting-user'
     if (needsAttention) {
       stuck = true
+      // Detect if this looks like an instability issue (adapter crashes) rather than
+      // a protocol violation. Check the last few messages for crash/error keywords.
+      // Instability gets a higher budget (5 vs 3) because it's often transient.
+      const recentText = msgs.slice(-3).map(renderMessageText).join(' ').toLowerCase()
+      const looksLikeInstability =
+        recentText.includes('崩溃') ||
+        recentText.includes('断连') ||
+        recentText.includes('crash') ||
+        recentText.includes('disconnect') ||
+        recentText.includes('适配器')
+      const budget = looksLikeInstability ? NUDGE_BUDGET_INSTABILITY : NUDGE_BUDGET_DEFAULT
       // Check if the assistant has exceeded the nudge budget for this team
-      if (conv.assistantNudgeCount >= NUDGE_BUDGET) exhausted = true
+      if (conv.assistantNudgeCount >= budget) exhausted = true
+      // Update flag text to show the effective budget
+      const nudgeInfo =
+        needsAttention && conv.assistantNudgeCount > 0
+          ? ` (已尝试 ${conv.assistantNudgeCount}/${budget} 次)`
+          : ''
+      var flag = needsAttention ? ` ⚠️卡住·待你决策${nudgeInfo}` : ''
+    } else {
+      var flag = ''
     }
     // A team that just settled (ended or awaiting-user) is "new activity" even if
     // its last message ts hasn't changed — the state transition itself is worth
@@ -230,11 +255,6 @@ function gatherSnapshot(): {
       })
       .filter(Boolean)
       .join('\n')
-    const nudgeInfo =
-      needsAttention && conv.assistantNudgeCount > 0
-        ? ` (已尝试 ${conv.assistantNudgeCount}/${NUDGE_BUDGET} 次)`
-        : ''
-    const flag = needsAttention ? ` ⚠️卡住·待你决策${nudgeInfo}` : ''
     const canContinue = conv.status === 'ended' || conv.status === 'awaiting-user' ? '【可用 <<CONTINUE>> 继续】' : ''
     sections.push(
       `# 项目「${project.name}」(路径 ${project.rootDir}, 状态 ${conv.status}, 会话ID ${conv.id})${flag}${canContinue}\n${lines || '  （无文本消息）'}`
@@ -500,7 +520,10 @@ async function runPass(
 ): Promise<void> {
   maybePrune() // cheap, model-free — run regardless of the quiet-window gate
   if (running) return // a slow brain pass must not overlap the next tick
-  if (brainBusy()) return // don't interrupt the user's conversation with the assistant
+  if (brainBusy()) {
+    console.log('[assistant-review] runPass skipped: brain is busy (user conversation)')
+    return
+  }
   // CRITICAL FIX: Don't gate on anyBusy() for capability-gap (stuck team) scenarios.
   // The old design blocked ALL review when ANY team was busy, causing stuck teams
   // to wait minutes instead of getting immediate help. New logic: check snapshot
@@ -512,7 +535,13 @@ async function runPass(
   // Apply quiet-window gate ONLY to non-urgent passes (reflection, heartbeat, routine review).
   // Stuck teams bypass this — they need immediate intervention regardless of other activity.
   const isUrgent = snapshot?.stuck ?? false
-  if (!isUrgent && anyBusy()) return
+  if (!isUrgent && anyBusy()) {
+    console.log('[assistant-review] runPass skipped: non-urgent and teams are busy')
+    return
+  }
+  if (isUrgent) {
+    console.log('[assistant-review] runPass: URGENT (stuck team bypasses quiet-window gate)')
+  }
   running = true
   try {
     // Reflection and team-review both spend a brain turn; run at most one per
@@ -551,6 +580,9 @@ async function runPass(
       kind: snapshot.stuck ? 'capability-gap' : 'review',
       text: `${intro}\n${instructions}\n${snapshot.text}`
     })
+    console.log(
+      `[assistant-review] brain responded to ${snapshot.stuck ? 'capability-gap' : 'review'}, exhausted=${snapshot.exhausted}`
+    )
     lastReviewedTs = snapshot.newestTs
   } catch (e) {
     console.error('[assistant-review] pass failed:', (e as Error).message)
@@ -605,6 +637,9 @@ export function startAssistantReview(opts?: {
     if (!freshConv) return
     const settled = freshConv.status === 'ended' || freshConv.status === 'awaiting-user'
     if (settled && isOwnedProject(view.projectId)) {
+      console.log(
+        `[assistant-review] team settled: ${view.id.slice(0, 8)} status=${freshConv.status}, scheduling review in ${NUDGE_DEBOUNCE_MS}ms`
+      )
       requestReviewSoon()
       return
     }

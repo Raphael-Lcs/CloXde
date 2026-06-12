@@ -34,6 +34,7 @@ export const IPC = {
   ConversationsCancel: 'conversations:cancel',
   ConversationsSetAutopilot: 'conversations:set-autopilot',
   ConversationsSetPrimarySide: 'conversations:set-primary-side',
+  ConversationsResetNudgeCount: 'conversations:reset-nudge-count',
 
   // Schedules (timed automation)
   SchedulesListByConversation: 'schedules:list-by-conversation',

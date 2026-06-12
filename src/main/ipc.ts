@@ -547,6 +547,18 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  ipcMain.handle(
+    IPC.ConversationsResetNudgeCount,
+    async (_e, id: unknown): Promise<IpcResult<true>> => {
+      if (typeof id !== 'string') return err('invalid id')
+      const conv = conversationRepo.get(id)
+      if (!conv) return err('conversation not found')
+      conversationRepo.patch(id, { assistantNudgeCount: 0 })
+      console.log(`[ipc] reset nudge count for ${id.slice(0, 8)} → 0`)
+      return ok(true)
+    }
+  )
+
   // --- Schedules (timed automation) --------------------------------------
   ipcMain.handle(
     IPC.SchedulesListByConversation,

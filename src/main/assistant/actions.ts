@@ -149,9 +149,13 @@ export async function continueTeam(input: {
   // engine when the team unsticks (status != awaiting-user) or when the user
   // manually intervenes (sendUserMessage with preempt=true).
   if (conv.status === 'awaiting-user') {
+    const newCount = conv.assistantNudgeCount + 1
     conversationRepo.patch(conv.id, {
-      assistantNudgeCount: conv.assistantNudgeCount + 1
+      assistantNudgeCount: newCount
     })
+    console.log(
+      `[assistant] CONTINUE sent to ${conv.id.slice(0, 8)}, nudge count: ${conv.assistantNudgeCount} → ${newCount}`
+    )
   }
   const project = projectRepo.get(conv.projectId)
   return {
