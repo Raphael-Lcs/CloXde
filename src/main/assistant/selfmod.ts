@@ -43,6 +43,8 @@ export interface SelfImprovementHandle {
   branch: string
   worktreeDir: string
   baseCommit: string
+  /** How many times gates have been attempted (incremented on each promotion try). */
+  gateAttempts: number
 }
 
 export class SelfModUnavailableError extends Error {
@@ -163,7 +165,7 @@ export async function dispatchSelfImprovement(
     detail: `base 分支=${baseBranch}, worktree=${dir}`
   })
 
-  return { project, conversation, branch, worktreeDir: dir, baseCommit }
+  return { project, conversation, branch, worktreeDir: dir, baseCommit, gateAttempts: 0 }
 }
 
 /** Tear down a worktree + its branch. Best-effort and idempotent: used both to
@@ -186,12 +188,14 @@ export interface PromotionResult {
   reason?: string
   /** True when a restart is needed to run the newly-merged code. */
   needsRestart: boolean
+  /** Set to true when the worktree was discarded (no retry possible). */
+  discarded: boolean
 }
 
 /**
  * Run the gate sequence against a self-improvement worktree and, if every gate
- * passes, merge the branch back into the running branch. On any failure the
- * worktree is discarded and nothing touches the live tree.
+ * passes, merge the branch back into the running branch. On gate failure, the
+ * caller decides whether to discard immediately or preserve for retry.
  *
  * Merge policy is fast-forward-only: the branch was cut from the live HEAD, so
  * a clean ff just advances the running branch onto the new commits — no merge
@@ -201,10 +205,12 @@ export interface PromotionResult {
  *
  * Returns a PromotionResult; `needsRestart` is true only when promoted (the
  * caller then asks the watchdog to restart onto the new code — see step 7).
+ * When gates fail, `discarded` indicates whether the worktree was cleaned up
+ * (true) or preserved for retry (false).
  */
 export async function promoteSelfImprovement(
   handle: SelfImprovementHandle,
-  gateOpts?: Partial<GateRunOptions>
+  gateOpts?: Partial<GateRunOptions> & { discardOnFailure?: boolean }
 ): Promise<PromotionResult> {
   if (!isSelfModAvailable()) throw new SelfModUnavailableError()
   const repoRoot = getRepoRoot()!
@@ -226,7 +232,8 @@ export async function promoteSelfImprovement(
       promoted: false,
       gateResults: [],
       needsRestart: false,
-      reason: '团队未提交任何改动'
+      reason: '团队未提交任何改动',
+      discarded: true
     }
   }
 
@@ -251,7 +258,10 @@ export async function promoteSelfImprovement(
 
   if (!allGatesPassed(gateResults)) {
     const fail = firstFailure(gateResults)
-    await discardWorktree(repoRoot, worktreeDir, branch)
+    const shouldDiscard = gateOpts?.discardOnFailure ?? false
+    if (shouldDiscard) {
+      await discardWorktree(repoRoot, worktreeDir, branch)
+    }
     recordSelfMod({
       phase: 'rejected',
       runId: project.id,
@@ -265,7 +275,8 @@ export async function promoteSelfImprovement(
       promoted: false,
       gateResults,
       needsRestart: false,
-      reason: `闸门未通过：${fail?.gate ?? '未知'}`
+      reason: `闸门未通过：${fail?.gate ?? '未知'}`,
+      discarded: shouldDiscard
     }
   }
 
@@ -285,7 +296,8 @@ export async function promoteSelfImprovement(
       promoted: false,
       gateResults,
       needsRestart: false,
-      reason: '快进合并失败：主分支已前移，需要先 rebase'
+      reason: '快进合并失败：主分支已前移，需要先 rebase',
+      discarded: false
     }
   }
 
@@ -305,7 +317,7 @@ export async function promoteSelfImprovement(
     detail: `已快进合并回主分支；新 HEAD=${resultCommit}`
   })
 
-  return { promoted: true, gateResults, resultCommit, needsRestart: true }
+  return { promoted: true, gateResults, resultCommit, needsRestart: true, discarded: true }
 }
 
 /**

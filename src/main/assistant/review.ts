@@ -30,6 +30,7 @@ import { nextCronFire } from '../conversation/cron'
 import { getWorkspaceDir } from '../paths'
 import { getAssistantBrain, type Signal } from './brain'
 import { getMemoryService } from './memory'
+import * as actions from './actions'
 import type { Message, Project, ConversationView } from '@shared/types'
 
 type AnyBusyFn = () => boolean
@@ -344,6 +345,77 @@ function describeInstability(events: InstabilityEvent[]): string {
   return sections.join('\n\n')
 }
 
+/** Check all owned projects for settled self-improvement teams (those with a
+ *  _selfModHandle transient field attached by the brain's SELFMOD dispatch). When
+ *  one settles (ended or awaiting-user), run the gate sequence and promote on
+ *  success, or report failure to the brain so it can re-brief the team. Retry
+ *  budget: 3 attempts before giving up and discarding the worktree. Returns true
+ *  if it spent a brain turn (reporting failure). Promotion itself restarts the
+ *  app, so no return happens on success. */
+async function maybePromoteSelfmod(think: ThinkFn): Promise<boolean> {
+  const GATE_RETRY_BUDGET = 3
+  for (const project of ownedProjects()) {
+    const handle = (project as any)._selfModHandle as import('./selfmod').SelfImprovementHandle | undefined
+    if (!handle) continue
+    const convs = conversationRepo.listByProject(project.id)
+    if (convs.length === 0) continue
+    const conv = convs[0]
+    const settled = conv.status === 'ended' || conv.status === 'awaiting-user'
+    if (!settled) continue
+
+    // Increment gate attempts counter
+    handle.gateAttempts++
+    const exhausted = handle.gateAttempts >= GATE_RETRY_BUDGET
+    console.log(
+      `[assistant-review] selfmod team settled: ${conv.id.slice(0, 8)}, running gates (attempt ${handle.gateAttempts}/${GATE_RETRY_BUDGET})`
+    )
+
+    try {
+      const result = await actions.promoteSelfImprovementRun(handle, {
+        discardOnFailure: exhausted // Only discard on final attempt
+      })
+
+      if (result.promoted) {
+        // Success path: the app will restart into the new code shortly, so we never
+        // reach here in practice. If we do, it means the restart is pending.
+        console.log('[assistant-review] selfmod promoted, app restarting')
+        delete (project as any)._selfModHandle
+        return false
+      }
+
+      // Failure path: gates failed. If we've exhausted retries, tell the brain it's
+      // over; otherwise keep the handle so the brain can CONTINUE and retry.
+      if (exhausted || result.discarded) {
+        console.log(`[assistant-review] selfmod gates failed after ${handle.gateAttempts} attempts, discarded: ${result.reason}`)
+        delete (project as any)._selfModHandle
+        await think({
+          kind: 'review',
+          text: `⚠️ 自我改进「${handle.project.name}」已尝试 ${handle.gateAttempts} 次，闸门仍未通过，分支已丢弃。最后失败原因：\n${result.reason}\n\n用 <<REPORT>> 告诉用户这次改进最终失败了。`
+        })
+        return true
+      }
+
+      // Not exhausted: keep the handle and tell the brain to CONTINUE with the team
+      console.log(`[assistant-review] selfmod gates failed (attempt ${handle.gateAttempts}/${GATE_RETRY_BUDGET}), preserving for retry: ${result.reason}`)
+      await think({
+        kind: 'review',
+        text: `⚠️ 自我改进「${handle.project.name}」的团队已完成工作，但闸门序列未通过（尝试 ${handle.gateAttempts}/${GATE_RETRY_BUDGET}）。失败原因：\n${result.reason}\n\nworktree 已保留，你可以：\n- 用 <<CONTINUE>>{"conversationId":"${conv.id}","message":"...闸门失败详情..."}<</CONTINUE>> 告诉团队问题，让它修复后团队会自动再次验收\n- 如果判断无法修复，用 <<REPORT>> 告诉用户并放弃（下次验收时会最终丢弃）`
+      })
+      return true
+
+    } catch (e) {
+      console.error('[assistant-review] selfmod promotion crashed:', (e as Error).message)
+      delete (project as any)._selfModHandle
+      await think({
+        kind: 'review',
+        text: `⚠️ 自我改进「${handle.project.name}」的闸门运行过程中崩溃：${(e as Error).message}\n建议 <<REPORT>> 告知用户。`
+      })
+      return true
+    }
+  }
+  return false
+}
+
 /** Drain adapter-instability events and, if they cross the escalation bar, wake
  *  the brain with an 'instability' signal so it can nudge the team back on track
  *  or tell the user the底座 is shaky. Returns true if it spent a brain turn.
@@ -545,10 +617,10 @@ async function runPass(
   running = true
   try {
     // Reflection and team-review both spend a brain turn; run at most one per
-    // tick. Instability (a crashing底座) is the most urgent, then a due
-    // self-reminder (the brain explicitly asked to be woken now), then reflection
-    // has its own (much longer) interval gate, so most ticks fall through to review.
+    // tick. Priority order: instability (crashing adapter) → selfmod promotion
+    // (gates on completed self-improvement) → reminders → reflection → review.
     if (await maybeReportInstability(think)) return
+    if (await maybePromoteSelfmod(think)) return
     if (await maybeFireReminders(think)) return
     if (await maybeReflect(think, turnCount)) return
     // snapshot already gathered above for the gate check

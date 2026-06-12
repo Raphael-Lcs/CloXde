@@ -235,16 +235,19 @@ export async function dispatchSelfImprovement(
 /** Run gates + promote a self-improvement run. The brain calls this after the
  *  team it dispatched has settled (status awaiting-user or ended). If all gates
  *  pass, the branch merges back and the app restarts onto the new code. On any
- *  failure the worktree is discarded. The brain surfaces the verdict to the user
- *  and, on rejection, can re-brief the team with the gate failure detail. */
+ *  failure the worktree may be preserved for retry (depending on options). The
+ *  brain surfaces the verdict to the user and, on rejection, can re-brief the
+ *  team with the gate failure detail. */
 export async function promoteSelfImprovementRun(
-  handle: SelfImprovementHandle
-): Promise<{ promoted: boolean; reason?: string }> {
+  handle: SelfImprovementHandle,
+  opts?: { discardOnFailure?: boolean }
+): Promise<{ promoted: boolean; reason?: string; discarded?: boolean }> {
   emitActivity({ phase: 'tool', text: '正在运行闸门序列（install/typecheck/test/build/smoke）…' })
   const result = await promoteSelfImprovement(handle, {
     onProgress: (gate, phase) => {
       if (phase === 'start') emitActivity({ phase: 'tool', text: `闸门: ${gate}` })
-    }
+    },
+    discardOnFailure: opts?.discardOnFailure
   })
   if (result.promoted) {
     emitActivity({ phase: 'tool', text: '所有闸门通过，已合并新代码，即将重启…' })
@@ -252,5 +255,5 @@ export async function promoteSelfImprovementRun(
     setTimeout(() => restartIntoNewCode(), 1500)
     return { promoted: true }
   }
-  return { promoted: false, reason: result.reason }
+  return { promoted: false, reason: result.reason, discarded: result.discarded }
 }
