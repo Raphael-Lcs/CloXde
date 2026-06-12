@@ -1,6 +1,6 @@
 {
   "name": "cloxde",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "Local desktop console orchestrating Claude Code CLI and Codex CLI via ACP",
   "main": "out/main/index.js",
