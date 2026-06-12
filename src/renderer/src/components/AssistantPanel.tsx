@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type {
   AssistantActivity,
   AssistantMemory,
@@ -718,14 +720,19 @@ export function AssistantPanel({ onNavigate, projects, conversationsByProject }:
         ) : (
           entries.map((e) => {
             const canNav = !!e.conversationId && !!e.projectId
+            const useMarkdown = e.role === 'assistant' || e.role === 'report'
             return (
               <div
                 key={e.id}
-                className={`assistant-msg role-${e.role}${canNav ? ' navigable' : ''}`}
+                className={`assistant-msg role-${e.role}${canNav ? ' navigable' : ''}${useMarkdown ? ' md' : ''}`}
                 onClick={canNav ? () => onNavigate(e.projectId!, e.conversationId!) : undefined}
                 title={canNav ? '点击查看这个团队' : undefined}
               >
-                {e.text}
+                {useMarkdown ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{e.text}</ReactMarkdown>
+                ) : (
+                  e.text
+                )}
                 {e.attachments && e.attachments.length > 0 && (
                   <div className="assistant-msg-attachments">
                     {e.attachments.map((att, i) => (
