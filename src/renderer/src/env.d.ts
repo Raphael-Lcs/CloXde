@@ -46,6 +46,10 @@ interface CloXdeApi {
     archive: (id: string) => Promise<IpcResult<true>>
     unarchive: (id: string) => Promise<IpcResult<true>>
     delete: (id: string) => Promise<IpcResult<true>>
+    updateDefaults: (
+      id: string,
+      defaults: { defaultPm?: AgentKind; defaultArchitect?: AgentKind; defaultExecutor?: AgentKind }
+    ) => Promise<IpcResult<true>>
   }
   profiles: {
     listByProject: (projectId: string) => Promise<IpcResult<AgentProfile[]>>
