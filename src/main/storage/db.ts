@@ -62,6 +62,7 @@ interface ProjectRow {
   id: string
   name: string
   root_dir: string
+  default_pm: string
   default_architect: string
   default_executor: string
   created_at: number
@@ -74,6 +75,7 @@ function rowToProject(row: ProjectRow): Project {
     id: row.id,
     name: row.name,
     rootDir: row.root_dir,
+    defaultPm: row.default_pm as AgentKind,
     defaultArchitect: row.default_architect as AgentKind,
     defaultExecutor: row.default_executor as AgentKind,
     createdAt: row.created_at,
@@ -82,7 +84,7 @@ function rowToProject(row: ProjectRow): Project {
   }
 }
 
-const PROJECT_COLUMNS = `id, name, root_dir, default_architect, default_executor,
+const PROJECT_COLUMNS = `id, name, root_dir, default_pm, default_architect, default_executor,
   created_at, last_opened_at, archived_at`
 
 export const projectRepo = {
@@ -139,15 +141,16 @@ export const projectRepo = {
     getDb()
       .prepare(
         `INSERT INTO projects
-           (id, name, root_dir, default_architect, default_executor,
+           (id, name, root_dir, default_pm, default_architect, default_executor,
             created_at, last_opened_at)
-         VALUES (?, ?, ?, 'claude', 'codex', ?, ?)`
+         VALUES (?, ?, ?, 'claude', 'claude', 'codex', ?, ?)`
       )
       .run(id, input.name, input.rootDir, now, now)
     return {
       id,
       name: input.name,
       rootDir: input.rootDir,
+      defaultPm: 'claude',
       defaultArchitect: 'claude',
       defaultExecutor: 'codex',
       createdAt: now,
@@ -174,6 +177,39 @@ export const projectRepo = {
   },
   delete(id: string): void {
     getDb().prepare('DELETE FROM projects WHERE id = ?').run(id)
+  },
+  patch(
+    id: string,
+    patch: {
+      name?: string
+      defaultPm?: AgentKind
+      defaultArchitect?: AgentKind
+      defaultExecutor?: AgentKind
+    }
+  ): void {
+    const fields: string[] = []
+    const values: unknown[] = []
+    if (patch.name !== undefined) {
+      fields.push('name = ?')
+      values.push(patch.name)
+    }
+    if (patch.defaultPm !== undefined) {
+      fields.push('default_pm = ?')
+      values.push(patch.defaultPm)
+    }
+    if (patch.defaultArchitect !== undefined) {
+      fields.push('default_architect = ?')
+      values.push(patch.defaultArchitect)
+    }
+    if (patch.defaultExecutor !== undefined) {
+      fields.push('default_executor = ?')
+      values.push(patch.defaultExecutor)
+    }
+    if (fields.length === 0) return
+    values.push(id)
+    getDb()
+      .prepare(`UPDATE projects SET ${fields.join(', ')} WHERE id = ?`)
+      .run(...values)
   }
 }
 
@@ -327,9 +363,9 @@ interface ConversationRow {
   id: string
   project_id: string
   title: string | null
-  pm_profile_id: string | null
-  architect_profile_id: string
-  executor_profile_id: string
+  pm_kind: string | null
+  architect_kind: string
+  executor_kind: string
   primary_side: string
   status: string
   autopilot: number
@@ -351,9 +387,9 @@ function rowToConversation(row: ConversationRow, parentIds: string[]): Conversat
     id: row.id,
     projectId: row.project_id,
     title: row.title ?? undefined,
-    pmProfileId: row.pm_profile_id ?? undefined,
-    architectProfileId: row.architect_profile_id,
-    executorProfileId: row.executor_profile_id,
+    pmKind: row.pm_kind ? (row.pm_kind as AgentKind) : undefined,
+    architectKind: row.architect_kind as AgentKind,
+    executorKind: row.executor_kind as AgentKind,
     primarySide: row.primary_side as Side,
     status: row.status as ConversationStatus,
     autopilot: row.autopilot !== 0,
@@ -372,8 +408,8 @@ function rowToConversation(row: ConversationRow, parentIds: string[]): Conversat
   }
 }
 
-const CONVERSATION_COLUMNS = `id, project_id, title, pm_profile_id,
-  architect_profile_id, executor_profile_id,
+const CONVERSATION_COLUMNS = `id, project_id, title, pm_kind,
+  architect_kind, executor_kind,
   primary_side, status, autopilot, max_auto_turns, auto_turns_used,
   pm_acp_session_id, architect_acp_session_id, executor_acp_session_id,
   inherited_summary, active_task_id, assistant_nudge_count, created_at, ended_at, archived_at`
@@ -437,9 +473,9 @@ export const conversationRepo = {
   create(input: {
     projectId: string
     title?: string
-    pmProfileId?: string
-    architectProfileId: string
-    executorProfileId: string
+    pmKind?: AgentKind
+    architectKind: AgentKind
+    executorKind: AgentKind
     primarySide?: Side
     autopilot?: boolean
     maxAutoTurns?: number
@@ -455,9 +491,9 @@ export const conversationRepo = {
       id,
       projectId: input.projectId,
       title: input.title,
-      pmProfileId: input.pmProfileId,
-      architectProfileId: input.architectProfileId,
-      executorProfileId: input.executorProfileId,
+      pmKind: input.pmKind,
+      architectKind: input.architectKind,
+      executorKind: input.executorKind,
       primarySide: input.primarySide ?? 'architect',
       status: 'idle',
       autopilot: input.autopilot ?? true,
@@ -471,8 +507,8 @@ export const conversationRepo = {
     const db = getDb()
     const insertConv = db.prepare(
       `INSERT INTO conversations
-         (id, project_id, title, pm_profile_id,
-          architect_profile_id, executor_profile_id,
+         (id, project_id, title, pm_kind,
+          architect_kind, executor_kind,
           primary_side, status, autopilot, max_auto_turns, auto_turns_used,
           inherited_summary, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, 0, ?, ?)`
@@ -486,9 +522,9 @@ export const conversationRepo = {
         c.id,
         c.projectId,
         c.title ?? null,
-        c.pmProfileId ?? null,
-        c.architectProfileId,
-        c.executorProfileId,
+        c.pmKind ?? null,
+        c.architectKind,
+        c.executorKind,
         c.primarySide,
         c.autopilot ? 1 : 0,
         c.maxAutoTurns,

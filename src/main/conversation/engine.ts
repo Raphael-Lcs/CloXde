@@ -134,7 +134,7 @@ interface SideRuntime {
 
 interface ActiveConversation {
   conversation: Conversation
-  /** Present iff conversation.pmProfileId is set (3-agent mode). */
+  /** Present iff conversation.pmKind is set (3-agent mode). */
   pm: SideRuntime | null
   architect: SideRuntime
   executor: SideRuntime
@@ -203,8 +203,8 @@ export class ConversationEngine extends EventEmitter {
     if (!conv) throw new Error(`Conversation not found: ${conversationId}`)
     const project = projectRepo.get(conv.projectId)
     if (!project) throw new Error(`Project not found: ${conv.projectId}`)
-    const architectProfile = profileRepo.get(conv.architectProfileId)
-    const executorProfile = profileRepo.get(conv.executorProfileId)
+    const architectProfile = profileRepo.findByKind(conv.projectId, conv.architectKind)
+    const executorProfile = profileRepo.findByKind(conv.projectId, conv.executorKind)
     if (!architectProfile || !executorProfile) {
       throw new Error('Conversation references a missing agent profile')
     }
@@ -329,7 +329,7 @@ export class ConversationEngine extends EventEmitter {
 
     // Optional PM runtime (3-agent mode).
     let pmRuntime: AcpRuntime | null = null
-    const pmProfile = conv.pmProfileId ? profileRepo.get(conv.pmProfileId) : null
+    const pmProfile = conv.pmKind ? profileRepo.findByKind(conv.projectId, conv.pmKind) : null
     if (pmProfile) {
       pmRuntime = new AcpRuntime({
         profile: pmProfile,
@@ -602,10 +602,17 @@ export class ConversationEngine extends EventEmitter {
     const { withMessages = true } = opts
     const conv = conversationRepo.get(conversationId)
     if (!conv) return null
-    const architect = profileRepo.get(conv.architectProfileId)
-    const executor = profileRepo.get(conv.executorProfileId)
+
+    // Dynamically look up profiles by kind from the project
+    const project = projectRepo.get(conv.projectId)
+    if (!project) return null
+
+    const architect = profileRepo.findByKind(conv.projectId, conv.architectKind)
+    const executor = profileRepo.findByKind(conv.projectId, conv.executorKind)
     if (!architect || !executor) return null
-    const pm = conv.pmProfileId ? profileRepo.get(conv.pmProfileId) ?? undefined : undefined
+
+    const pm = conv.pmKind ? profileRepo.findByKind(conv.projectId, conv.pmKind) ?? undefined : undefined
+
     const active = this.active.get(conversationId)
     // Derive busySide from actual runtime streaming state — multiple sides
     // can be busy at once (user chatting with PM while team is running).

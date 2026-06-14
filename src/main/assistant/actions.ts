@@ -85,9 +85,9 @@ export async function briefTeam(input: BriefTeamInput): Promise<Conversation> {
   const conv = conversationRepo.create({
     projectId: project.id,
     title: input.title ?? project.name,
-    pmProfileId: pm.id,
-    architectProfileId: architect.id,
-    executorProfileId: executor.id,
+    pmKind,
+    architectKind,
+    executorKind,
     primarySide: 'architect',
     autopilot: true
   })

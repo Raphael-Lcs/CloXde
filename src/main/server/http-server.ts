@@ -384,16 +384,10 @@ export function startHttpServer(port = DEFAULT_PORT): ServerHandle {
       return
     }
     const withPm = i.withPm !== false
-    let pmProfileId: string | undefined
+    let pmKind: AgentKind | undefined
     if (withPm) {
       const defaultPmKind: AgentKind = 'claude'
-      const pmKind = isAgentKind(i.pmKind) ? i.pmKind : defaultPmKind
-      const pm = profileRepo.findByKind(project.id, pmKind)
-      if (!pm) {
-        res.json(err('PM profile 缺失'))
-        return
-      }
-      pmProfileId = pm.id
+      pmKind = isAgentKind(i.pmKind) ? i.pmKind : defaultPmKind
     }
 
     const requestedParents = Array.isArray(i.parentIds) ? i.parentIds : []
@@ -415,9 +409,9 @@ export function startHttpServer(port = DEFAULT_PORT): ServerHandle {
     const conv = conversationRepo.create({
       projectId: project.id,
       title: i.title,
-      pmProfileId,
-      architectProfileId: architect.id,
-      executorProfileId: executor.id,
+      pmKind,
+      architectKind,
+      executorKind,
       primarySide: 'architect',
       autopilot: true,
       parentIds: validParentIds,

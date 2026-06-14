@@ -207,7 +207,7 @@ function gatherSnapshot(): {
     // Dynamically choose message count: more when PM exists (30) to capture the
     // PM's acceptance report buried under architect+executor exchanges, fewer (20)
     // in 2-agent mode where the architect reports directly.
-    const msgCount = conv.pmProfileId ? MESSAGES_PER_CONV_WITH_PM : MESSAGES_PER_CONV
+    const msgCount = conv.pmKind ? MESSAGES_PER_CONV_WITH_PM : MESSAGES_PER_CONV
     const allMsgs = messageRepo.listRecentByConversation(conv.id, msgCount)
     if (allMsgs.length === 0) continue
 
@@ -669,6 +669,12 @@ async function runPass(
   }
 }
 
+// TEMPORARY: Disable assistant proactive review to stabilize v0.7.1.
+// The assistant's capability-gap intervention is not stable enough yet —
+// it intervenes at wrong times (when teams are working normally) and misses
+// when teams are actually stuck. Re-enable after fixing the detection logic.
+const ASSISTANT_REVIEW_ENABLED = false
+
 /** Start the periodic review loop. Dependencies are injectable for tests;
  *  defaults wire the live engine + brain. */
 export function startAssistantReview(opts?: {
@@ -678,6 +684,10 @@ export function startAssistantReview(opts?: {
   turnCount?: TurnCountFn
   intervalMs?: number
 }): void {
+  if (!ASSISTANT_REVIEW_ENABLED) {
+    console.log('[assistant-review] DISABLED: proactive review is temporarily off')
+    return
+  }
   if (timer) return
 
   const anyBusy = opts?.anyBusy ?? (() => conversationEngine.anyBusy())

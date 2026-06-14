@@ -15,6 +15,8 @@ interface SettingsDialogProps {
   archivedProjects: Project[]
   onUnarchiveProject: (id: string) => void
   onDeleteProject: (id: string) => void
+  /** Called when project settings are updated, so the parent can refresh. */
+  onProjectUpdated?: () => void
 }
 
 type SectionId = 'agent' | 'general' | 'archived-projects' | 'lan' | 'wechat' | 'about'
@@ -50,7 +52,8 @@ export function SettingsDialog({
   onClose,
   archivedProjects,
   onUnarchiveProject,
-  onDeleteProject
+  onDeleteProject,
+  onProjectUpdated
 }: SettingsDialogProps): JSX.Element | null {
   // Always show every section in the nav. Sections that need a project but
   // don't have one render a fallback message in their content panel; we
@@ -100,7 +103,7 @@ export function SettingsDialog({
             })}
           </nav>
           <div className="settings-content">
-            {active === 'agent' && project && <AgentSection project={project} />}
+            {active === 'agent' && project && <AgentSection project={project} onProjectUpdated={onProjectUpdated} />}
             {active === 'agent' && !project && (
               <div className="settings-pane">
                 <p style={{ color: 'var(--fg-dim)' }}>
@@ -176,7 +179,7 @@ function rowsToEnv(rows: DraftRow[]): Record<string, string> {
   return out
 }
 
-function AgentSection({ project }: { project: Project }): JSX.Element {
+function AgentSection({ project, onProjectUpdated }: { project: Project; onProjectUpdated?: () => void }): JSX.Element {
   const [profiles, setProfiles] = useState<AgentProfile[]>([])
   const [active, setActive] = useState<AgentKind>('claude')
   const [draftEnv, setDraftEnv] = useState<DraftRow[]>([])
@@ -340,7 +343,124 @@ function AgentSection({ project }: { project: Project }): JSX.Element {
           {busy ? '保存中…' : dirty ? '保存改动' : '已保存'}
         </button>
       </div>
+
+      {/* Role defaults section */}
+      <div style={{ marginTop: 40, paddingTop: 24, borderTop: '1px solid var(--border)' }}>
+        <h3 style={{ marginTop: 0 }}>角色默认 Agent</h3>
+        <p style={{ color: 'var(--fg-dim)', fontSize: '13px', marginBottom: 16 }}>
+          设置新建会话时，PM、架构师、执行者默认使用哪个 Agent。可在创建会话时单独调整。
+        </p>
+        <RoleDefaultsSection project={project} onProjectUpdated={onProjectUpdated} />
+      </div>
     </div>
+  )
+}
+
+function RoleDefaultsSection({ project, onProjectUpdated }: { project: Project; onProjectUpdated?: () => void }): JSX.Element {
+  const [pmKind, setPmKind] = useState<AgentKind>(project.defaultPm)
+  const [architectKind, setArchitectKind] = useState<AgentKind>(project.defaultArchitect)
+  const [executorKind, setExecutorKind] = useState<AgentKind>(project.defaultExecutor)
+  const [busy, setBusy] = useState(false)
+  const [dirty, setDirty] = useState(false)
+
+  useEffect(() => {
+    setPmKind(project.defaultPm)
+    setArchitectKind(project.defaultArchitect)
+    setExecutorKind(project.defaultExecutor)
+    setDirty(false)
+  }, [project.defaultPm, project.defaultArchitect, project.defaultExecutor])
+
+  const save = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const res = await window.api.projects.updateDefaults(project.id, {
+        defaultPm: pmKind,
+        defaultArchitect: architectKind,
+        defaultExecutor: executorKind
+      })
+      if (!res.ok) {
+        window.alert(`保存失败：${res.error}`)
+        setBusy(false)
+        return
+      }
+      // Trigger parent refresh and wait for it to complete
+      if (onProjectUpdated) {
+        await onProjectUpdated()
+      }
+      setDirty(false)
+    } catch (e) {
+      window.alert(`保存出错：${(e as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <label className="field">
+        <span>PM 默认</span>
+        <div className="agent-tabs">
+          {(['claude', 'codex', 'hermes'] as AgentKind[]).map((k) => (
+            <button
+              key={k}
+              className={`toggle-btn kind-${k} ${pmKind === k ? 'active' : ''}`}
+              onClick={() => {
+                setPmKind(k)
+                setDirty(true)
+              }}
+            >
+              {k === 'hermes' ? 'Hermes' : k}
+            </button>
+          ))}
+        </div>
+      </label>
+
+      <label className="field">
+        <span>架构师默认</span>
+        <div className="agent-tabs">
+          {(['claude', 'codex', 'hermes'] as AgentKind[]).map((k) => (
+            <button
+              key={k}
+              className={`toggle-btn kind-${k} ${architectKind === k ? 'active' : ''}`}
+              onClick={() => {
+                setArchitectKind(k)
+                setDirty(true)
+              }}
+            >
+              {k === 'hermes' ? 'Hermes' : k}
+            </button>
+          ))}
+        </div>
+      </label>
+
+      <label className="field">
+        <span>执行者默认</span>
+        <div className="agent-tabs">
+          {(['claude', 'codex', 'hermes'] as AgentKind[]).map((k) => (
+            <button
+              key={k}
+              className={`toggle-btn kind-${k} ${executorKind === k ? 'active' : ''}`}
+              onClick={() => {
+                setExecutorKind(k)
+                setDirty(true)
+              }}
+            >
+              {k === 'hermes' ? 'Hermes' : k}
+            </button>
+          ))}
+        </div>
+      </label>
+
+      <div className="settings-actions">
+        <button
+          className="primary"
+          onClick={() => void save()}
+          disabled={busy || !dirty}
+        >
+          {busy ? '保存中…' : dirty ? '保存改动' : '已保存'}
+        </button>
+      </div>
+    </>
   )
 }
 

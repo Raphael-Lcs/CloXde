@@ -413,6 +413,99 @@ const MIGRATIONS: Migration[] = [
           ADD COLUMN assistant_nudge_count INTEGER NOT NULL DEFAULT 0;
       `)
     }
+  },
+  {
+    version: 17,
+    name: 'project-default-pm',
+    up(db) {
+      // Add default_pm to projects so new conversations can default the PM agent
+      // kind just like architect and executor. Default to 'claude' (Claude Code)
+      // which is the stable choice — Hermes is available but still experimental.
+      db.exec(`
+        ALTER TABLE projects
+          ADD COLUMN default_pm TEXT NOT NULL DEFAULT 'claude';
+      `)
+    }
+  },
+  {
+    version: 18,
+    name: 'conversation-agent-kinds',
+    up(db) {
+      // Replace conversation profile ids with agent kinds so conversations
+      // automatically use updated project defaults. Conversations now store
+      // 'claude'/'codex'/'hermes' instead of profile UUIDs, and profiles are
+      // looked up dynamically at runtime from the project's agent_profiles table.
+
+      // Step 1: Add new kind columns with defaults
+      db.exec(`
+        ALTER TABLE conversations ADD COLUMN pm_kind TEXT;
+        ALTER TABLE conversations ADD COLUMN architect_kind TEXT NOT NULL DEFAULT 'claude';
+        ALTER TABLE conversations ADD COLUMN executor_kind TEXT NOT NULL DEFAULT 'codex';
+      `)
+
+      // Step 2: Migrate existing data: find the kind for each profile_id
+      db.exec(`
+        -- For pm_profile_id (nullable)
+        UPDATE conversations SET pm_kind = (
+          SELECT kind FROM agent_profiles WHERE id = conversations.pm_profile_id
+        ) WHERE pm_profile_id IS NOT NULL;
+
+        -- For architect_profile_id (required)
+        UPDATE conversations SET architect_kind = (
+          SELECT kind FROM agent_profiles WHERE id = conversations.architect_profile_id
+        );
+
+        -- For executor_profile_id (required)
+        UPDATE conversations SET executor_kind = (
+          SELECT kind FROM agent_profiles WHERE id = conversations.executor_profile_id
+        );
+      `)
+
+      // Step 3: Since SQLite < 3.35.0 doesn't support DROP COLUMN, we need to
+      // recreate the table without the old profile_id columns
+      db.exec(`
+        -- Create new table with desired schema
+        CREATE TABLE conversations_new (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          title TEXT,
+          pm_kind TEXT,
+          architect_kind TEXT NOT NULL,
+          executor_kind TEXT NOT NULL,
+          primary_side TEXT NOT NULL,
+          status TEXT NOT NULL,
+          autopilot INTEGER NOT NULL,
+          max_auto_turns INTEGER NOT NULL,
+          auto_turns_used INTEGER NOT NULL,
+          pm_acp_session_id TEXT,
+          architect_acp_session_id TEXT,
+          executor_acp_session_id TEXT,
+          inherited_summary TEXT,
+          active_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+          assistant_nudge_count INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          archived_at INTEGER
+        );
+
+        -- Copy data from old table to new table
+        INSERT INTO conversations_new SELECT
+          id, project_id, title, pm_kind, architect_kind, executor_kind,
+          primary_side, status, autopilot, max_auto_turns, auto_turns_used,
+          pm_acp_session_id, architect_acp_session_id, executor_acp_session_id,
+          inherited_summary, active_task_id, assistant_nudge_count,
+          created_at, ended_at, archived_at
+        FROM conversations;
+
+        -- Drop old table and rename new one
+        DROP TABLE conversations;
+        ALTER TABLE conversations_new RENAME TO conversations;
+
+        -- Recreate index
+        CREATE INDEX idx_conversations_project ON conversations(project_id);
+        CREATE INDEX idx_conversations_status ON conversations(status);
+      `)
+    }
   }
 ]
 

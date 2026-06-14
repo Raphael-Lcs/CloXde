@@ -15,6 +15,8 @@ interface NewConversationDialogProps {
     parentIds: string[]
     summaryOverride?: string
     pmKind?: AgentKind
+    architectKind?: AgentKind
+    executorKind?: AgentKind
   }) => Promise<void>
 }
 
@@ -36,22 +38,28 @@ export function NewConversationDialog({
   onClose,
   onCreate
 }: NewConversationDialogProps): JSX.Element | null {
+  const [showInheritance, setShowInheritance] = useState(false)
   const [pickedParents, setPickedParents] = useState<Set<string>>(new Set())
   const [summary, setSummary] = useState('')
   const [summaryDirty, setSummaryDirty] = useState(false)
   const [previewBusy, setPreviewBusy] = useState(false)
-  const [pmKind, setPmKind] = useState<AgentKind>('claude')
+  const [pmKind, setPmKind] = useState<AgentKind>(project.defaultPm)
+  const [architectKind, setArchitectKind] = useState<AgentKind>(project.defaultArchitect)
+  const [executorKind, setExecutorKind] = useState<AgentKind>(project.defaultExecutor)
   const [busy, setBusy] = useState(false)
 
   // Reset state every time the dialog opens fresh.
   useEffect(() => {
     if (!open) return
+    setShowInheritance(false)
     setPickedParents(new Set())
     setSummary('')
     setSummaryDirty(false)
-    setPmKind('claude')
+    setPmKind(project.defaultPm)
+    setArchitectKind(project.defaultArchitect)
+    setExecutorKind(project.defaultExecutor)
     setBusy(false)
-  }, [open])
+  }, [open, project.defaultPm, project.defaultArchitect, project.defaultExecutor])
 
   const parentIdList = useMemo(() => Array.from(pickedParents), [pickedParents])
 
@@ -95,7 +103,9 @@ export function NewConversationDialog({
       await onCreate({
         parentIds: parentIdList,
         summaryOverride: summaryDirty && summary.trim() ? summary : undefined,
-        pmKind
+        pmKind,
+        architectKind,
+        executorKind
       })
     } finally {
       setBusy(false)
@@ -137,6 +147,40 @@ export function NewConversationDialog({
               </div>
               <div className="settings-hint" style={{ marginTop: 4 }}>
                 Hermes 需要 tool 授权 UI 才能稳定使用，目前推荐 Claude Code。
+              </div>
+            </div>
+
+            <div className="new-conv-section">
+              <div className="new-conv-label">架构师角色</div>
+              <div className="new-conv-pm-tabs">
+                {(['claude', 'codex', 'hermes'] as AgentKind[]).map((k) => (
+                  <button
+                    key={k}
+                    className={`toggle-btn kind-${k} ${architectKind === k ? 'active' : ''}`}
+                    onClick={() => setArchitectKind(k)}
+                  >
+                    {k === 'claude' ? 'Claude Code'
+                      : k === 'codex' ? 'Codex'
+                      : 'Hermes'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="new-conv-section">
+              <div className="new-conv-label">执行者角色</div>
+              <div className="new-conv-pm-tabs">
+                {(['claude', 'codex', 'hermes'] as AgentKind[]).map((k) => (
+                  <button
+                    key={k}
+                    className={`toggle-btn kind-${k} ${executorKind === k ? 'active' : ''}`}
+                    onClick={() => setExecutorKind(k)}
+                  >
+                    {k === 'claude' ? 'Claude Code'
+                      : k === 'codex' ? 'Codex'
+                      : 'Hermes'}
+                  </button>
+                ))}
               </div>
             </div>
 

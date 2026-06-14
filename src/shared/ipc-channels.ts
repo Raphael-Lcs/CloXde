@@ -16,6 +16,7 @@ export const IPC = {
   ProjectsArchive: 'projects:archive',
   ProjectsUnarchive: 'projects:unarchive',
   ProjectsDelete: 'projects:delete',
+  ProjectsUpdateDefaults: 'projects:update-defaults',
 
   // Agent profiles (per-project env / args / command overrides)
   ProfilesListByProject: 'profiles:list-by-project',

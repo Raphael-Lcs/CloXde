@@ -256,6 +256,35 @@ export function registerIpcHandlers(): void {
     return ok(true)
   })
 
+  ipcMain.handle(
+    IPC.ProjectsUpdateDefaults,
+    (
+      _e,
+      id: unknown,
+      defaults: unknown
+    ): IpcResult<true> => {
+      if (typeof id !== 'string') return err('invalid id')
+      const d = defaults as { defaultPm?: AgentKind; defaultArchitect?: AgentKind; defaultExecutor?: AgentKind }
+      if (!d) return err('invalid defaults')
+
+      const updates: Partial<Project> = {}
+      if (d.defaultPm !== undefined && isAgentKind(d.defaultPm)) {
+        updates.defaultPm = d.defaultPm
+      }
+      if (d.defaultArchitect !== undefined && isAgentKind(d.defaultArchitect)) {
+        updates.defaultArchitect = d.defaultArchitect
+      }
+      if (d.defaultExecutor !== undefined && isAgentKind(d.defaultExecutor)) {
+        updates.defaultExecutor = d.defaultExecutor
+      }
+
+      if (Object.keys(updates).length === 0) return err('no valid updates')
+
+      projectRepo.patch(id, updates)
+      return ok(true)
+    }
+  )
+
   // --- Agent profiles ----------------------------------------------------
   ipcMain.handle(
     IPC.ProfilesListByProject,
@@ -337,23 +366,11 @@ export function registerIpcHandlers(): void {
       const executorKind = isAgentKind(i.executorKind)
         ? i.executorKind
         : project.defaultExecutor
-      const architect = profileRepo.findByKind(project.id, architectKind)
-      const executor = profileRepo.findByKind(project.id, executorKind)
-      if (!architect || !executor) return err('agent profile 缺失')
 
       const withPm = i.withPm !== false
-      let pmProfileId: string | undefined
+      let pmKind: AgentKind | undefined
       if (withPm) {
-        // Default PM = Claude Code. Hermes is available as a selectable
-        // option in Settings → Agent → Hermes, but until CloXde wires a
-        // permission UI for Hermes' tool calls, defaulting to it gets the
-        // user stuck on "OTHER 待执行" the moment Hermes tries to read a
-        // file / search sessions / etc.
-        const defaultPmKind: AgentKind = 'claude'
-        const pmKind = isAgentKind(i.pmKind) ? i.pmKind : defaultPmKind
-        const pm = profileRepo.findByKind(project.id, pmKind)
-        if (!pm) return err('PM profile 缺失')
-        pmProfileId = pm.id
+        pmKind = isAgentKind(i.pmKind) ? i.pmKind : project.defaultPm
       }
 
       // Filter parent ids: must belong to this project and not be self.
@@ -378,9 +395,9 @@ export function registerIpcHandlers(): void {
       const conv = conversationRepo.create({
         projectId: project.id,
         title: i.title,
-        pmProfileId,
-        architectProfileId: architect.id,
-        executorProfileId: executor.id,
+        pmKind,
+        architectKind,
+        executorKind,
         primarySide: 'architect',
         autopilot: true,
         parentIds: validParentIds,

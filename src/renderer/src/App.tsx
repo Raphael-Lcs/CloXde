@@ -86,8 +86,8 @@ export function App(): JSX.Element {
   const [paletteOpen, setPaletteOpen] = useState(false)
   // Standalone assistant view — the user-scoped layer above the team. When
   // open, it replaces the project/conversation main area.
-  // DEFAULT TO TRUE: assistant is now the primary interface, teams are secondary.
-  const [assistantOpen, setAssistantOpen] = useState(true)
+  // DEFAULT TO FALSE: teams (project list) are the stable primary interface.
+  const [assistantOpen, setAssistantOpen] = useState(false)
   // Unread proactive reports from the assistant's review loop. Drives a count
   // badge on the titlebar assistant button so the user notices a report even
   // when the panel is closed. Cleared when the panel is opened.
@@ -303,22 +303,33 @@ export function App(): JSX.Element {
         parentIds: string[]
         summaryOverride?: string
         pmKind?: AgentKind
+        architectKind?: AgentKind
+        executorKind?: AgentKind
       }
     ) => {
-      const res = await window.api.conversations.create({
-        projectId,
-        parentIds: input.parentIds.length ? input.parentIds : undefined,
-        summaryOverride: input.summaryOverride,
-        pmKind: input.pmKind
-      })
-      if (!res.ok) {
-        window.alert(`创建会话失败：${res.error}`)
-        return
+      try {
+        console.log('[handleConfirmNewConversation] input:', input)
+        const res = await window.api.conversations.create({
+          projectId,
+          parentIds: input.parentIds.length ? input.parentIds : undefined,
+          summaryOverride: input.summaryOverride,
+          pmKind: input.pmKind,
+          architectKind: input.architectKind,
+          executorKind: input.executorKind
+        })
+        console.log('[handleConfirmNewConversation] result:', res)
+        if (!res.ok) {
+          window.alert(`创建会话失败：${res.error}`)
+          return
+        }
+        await refreshConversations(projectId)
+        setActiveProjectId(projectId)
+        setActiveConvId(res.data.id)
+        setNewConvProjectId(null)
+      } catch (e) {
+        console.error('[handleConfirmNewConversation] exception:', e)
+        window.alert(`创建会话出错：${(e as Error).message}\n\n堆栈：${(e as Error).stack}`)
       }
-      await refreshConversations(projectId)
-      setActiveProjectId(projectId)
-      setActiveConvId(res.data.id)
-      setNewConvProjectId(null)
     },
     [refreshConversations]
   )
@@ -914,6 +925,7 @@ export function App(): JSX.Element {
         archivedProjects={archivedProjects}
         onUnarchiveProject={(id) => void handleUnarchiveProject(id)}
         onDeleteProject={(id) => void handleDeleteProject(id)}
+        onProjectUpdated={refreshProjects}
       />
       {archiveDialogProjectId && (() => {
         const proj = projects.find((p) => p.id === archiveDialogProjectId)

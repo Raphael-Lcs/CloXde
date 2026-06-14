@@ -18,6 +18,7 @@ export interface Project {
   id: string
   name: string
   rootDir: string
+  defaultPm: AgentKind
   defaultArchitect: AgentKind
   defaultExecutor: AgentKind
   createdAt: number
@@ -105,11 +106,11 @@ export interface Conversation {
   /** When set, this conversation runs in 3-agent (PM) mode — the user talks
    *  to PM, who dispatches to the architect+executor team. NULL = legacy
    *  2-agent mode (user talks directly to architect). */
-  pmProfileId?: string
-  /** Which AgentProfile drives the architect side. */
-  architectProfileId: string
-  /** Which AgentProfile drives the executor side. */
-  executorProfileId: string
+  pmKind?: AgentKind
+  /** Which AgentKind drives the architect side. */
+  architectKind: AgentKind
+  /** Which AgentKind drives the executor side. */
+  executorKind: AgentKind
   /** User input defaults to this side. In 3-agent mode this is ignored
    *  (input always goes to PM). */
   primarySide: Side

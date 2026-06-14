@@ -56,7 +56,12 @@ const api = {
     unarchive: (id: string): Promise<IpcResult<true>> =>
       ipcRenderer.invoke(IPC.ProjectsUnarchive, id),
     delete: (id: string): Promise<IpcResult<true>> =>
-      ipcRenderer.invoke(IPC.ProjectsDelete, id)
+      ipcRenderer.invoke(IPC.ProjectsDelete, id),
+    updateDefaults: (
+      id: string,
+      defaults: { defaultPm?: AgentKind; defaultArchitect?: AgentKind; defaultExecutor?: AgentKind }
+    ): Promise<IpcResult<true>> =>
+      ipcRenderer.invoke(IPC.ProjectsUpdateDefaults, id, defaults)
   },
   profiles: {
     listByProject: (projectId: string): Promise<IpcResult<AgentProfile[]>> =>
