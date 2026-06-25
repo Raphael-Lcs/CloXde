@@ -71,6 +71,8 @@ export function startWebhookServer(options: WebhookServerOptions = {}): number {
 
       // 事件处理
       if ('header' in event) {
+        console.log('[feishu-webhook] received event:', event.header.event_type)
+
         // 验证签名（如果配置了 encryptKey）
         if (encryptKey) {
           const timestamp = req.headers['x-lark-request-timestamp'] as string
@@ -78,6 +80,7 @@ export function startWebhookServer(options: WebhookServerOptions = {}): number {
           const signature = req.headers['x-lark-signature'] as string
 
           if (!verifySignature(timestamp, nonce, encryptKey, body, signature)) {
+            console.error('[feishu-webhook] signature verification failed')
             res.writeHead(403, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ error: 'invalid signature' }))
             return
@@ -91,6 +94,7 @@ export function startWebhookServer(options: WebhookServerOptions = {}): number {
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true }))
+        console.log('[feishu-webhook] event handled, responded 200')
         return
       }
 

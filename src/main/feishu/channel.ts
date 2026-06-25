@@ -19,7 +19,6 @@ const FEISHU_TEXT_MAX_LENGTH = 4096
 interface ChannelState {
   running: boolean
   client: FeishuClient | null
-  stopPolling: (() => void) | null
   reportUnsubscribe: (() => void) | null
   activeConversations: Set<string>
 }
@@ -27,7 +26,6 @@ interface ChannelState {
 const state: ChannelState = {
   running: false,
   client: null,
-  stopPolling: null,
   reportUnsubscribe: null,
   activeConversations: new Set()
 }
@@ -44,7 +42,8 @@ export function start(): void {
   const credential = loadCredential()
   if (credential) {
     console.log('[feishu] restoring session from saved credential')
-    startPolling(credential.appId, credential.appSecret)
+    state.client = new FeishuClient({ appId: credential.appId, appSecret: credential.appSecret })
+    console.log('[feishu] client initialized, waiting for Webhook events')
   } else {
     console.log('[feishu] no saved credential, waiting for setup')
   }
@@ -56,9 +55,7 @@ export function start(): void {
 export function stop(): void {
   if (!state.running) return
 
-  state.stopPolling?.()
   state.reportUnsubscribe?.()
-  state.stopPolling = null
   state.reportUnsubscribe = null
   state.client = null
   state.activeConversations.clear()
@@ -71,13 +68,17 @@ export function stop(): void {
  */
 export async function setup(appId: string, appSecret: string): Promise<void> {
   saveCredential(appId, appSecret)
-  startPolling(appId, appSecret)
-  console.log('[feishu] setup completed')
+
+  // 立即启动（无需重启应用）
+  if (state.running) {
+    stop()
+  }
+
+  start()
+  console.log('[feishu] setup completed and channel started')
 }
 
 export function logout(): void {
-  state.stopPolling?.()
-  state.stopPolling = null
   state.client = null
   state.activeConversations.clear()
   clearStoredCredential()
@@ -100,19 +101,35 @@ export function getStatus(): {
  * 外部 HTTP server 需要调用此函数
  */
 export async function handleWebhookEvent(event: any): Promise<void> {
+  console.log('[feishu] webhook event received:', event?.header?.event_type)
+
   if (!state.client) {
     console.warn('[feishu] webhook received but client not initialized')
     return
   }
 
   const credential = loadCredential()
-  if (!credential) return
+  if (!credential) {
+    console.warn('[feishu] webhook received but no credential found')
+    return
+  }
 
   const message = state.client.handleWebhookEvent(event, credential.appId)
-  if (!message) return
+  if (!message) {
+    console.log('[feishu] event is not a valid message, skipping')
+    return
+  }
+
+  console.log('[feishu] parsed message:', {
+    chatId: message.chatId,
+    senderId: message.senderId,
+    text: message.text.substring(0, 50),
+    isMentioned: message.isMentioned,
+    chatType: event.event?.message?.chat_type
+  })
 
   // 群聊中只响应 @提及
-  if (event.event.message.chat_type === 'group' && !message.isMentioned) {
+  if (event.event?.message?.chat_type === 'group' && !message.isMentioned) {
     console.log('[feishu] 群聊消息未@机器人，忽略')
     return
   }
@@ -120,20 +137,8 @@ export async function handleWebhookEvent(event: any): Promise<void> {
   await handleInboundMessage(message)
 }
 
-function startPolling(appId: string, appSecret: string): void {
-  state.stopPolling?.()
-  state.client = new FeishuClient({ appId, appSecret })
-
-  const { stop: stopFn } = state.client.startEventStream((msg: FeishuMessage) => {
-    void handleInboundMessage(msg)
-  })
-
-  state.stopPolling = stopFn
-  console.log('[feishu] polling started')
-}
-
 async function handleInboundMessage(msg: FeishuMessage): Promise<void> {
-  console.log('[feishu] inbound message from', msg.senderId)
+  console.log('[feishu] processing inbound message from', msg.senderId)
   state.activeConversations.add(msg.chatId)
 
   persistUserMessage(assistantMessageRepo, msg.text)
@@ -148,7 +153,9 @@ async function handleInboundMessage(msg: FeishuMessage): Promise<void> {
     persistTurnOutputs(assistantMessageRepo, turn)
 
     if (turn.raw.trim() && state.client) {
+      console.log('[feishu] sending response, length:', turn.raw.length)
       await sendTextWithSplit(state.client, msg.chatId, turn.raw)
+      console.log('[feishu] response sent successfully')
     }
   } catch (e) {
     const errorMsg = (e as Error).message
