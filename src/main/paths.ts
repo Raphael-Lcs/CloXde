@@ -1,6 +1,20 @@
-import { app } from 'electron'
 import { join } from 'node:path'
 import { mkdirSync, readFileSync, existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+
+// Lazy-load electron to avoid crashes in test environments where
+// ELECTRON_SKIP_BINARY_DOWNLOAD=1 is set (CI). If electron is unavailable,
+// fall back to os.homedir().
+let electronApp: typeof import('electron').app | null = null
+function getElectronApp() {
+  if (electronApp !== null) return electronApp
+  try {
+    electronApp = require('electron').app
+  } catch {
+    electronApp = null
+  }
+  return electronApp
+}
 
 // All user data lives under ~/.cloxde (per DESIGN §4.2 / §9).
 // We compute paths lazily: the bundler keeps top-level access to electron.app
@@ -39,7 +53,8 @@ function compute(): {
   workspaceDir: string
 } {
   if (cached) return cached
-  const home = app.getPath('home')
+  const app = getElectronApp()
+  const home = app ? app.getPath('home') : homedir()
   const cloxdeDir = join(home, '.cloxde')
   cached = {
     cloxdeDir,
@@ -93,7 +108,7 @@ let repoRootCache: string | null | undefined
 
 /**
  * The CloXde source git working tree root, or null when unavailable
- * (packaged build, or no .git found walking up from the app path).
+ * (packaged build, no .git found, or electron unavailable in test env).
  *
  * In dev, app.getAppPath() resolves to the project root (the dir holding
  * package.json). We walk upward looking for a `.git` entry so the result holds
@@ -101,7 +116,8 @@ let repoRootCache: string | null | undefined
  */
 export function getRepoRoot(): string | null {
   if (repoRootCache !== undefined) return repoRootCache
-  if (app.isPackaged) {
+  const app = getElectronApp()
+  if (!app || app.isPackaged) {
     repoRootCache = null
     return null
   }
