@@ -17,7 +17,7 @@ interface SettingsDialogProps {
   onDeleteProject: (id: string) => void
 }
 
-type SectionId = 'agent' | 'general' | 'archived-projects' | 'lan' | 'wechat' | 'about'
+type SectionId = 'agent' | 'general' | 'archived-projects' | 'lan' | 'wechat' | 'feishu' | 'about'
 
 interface SectionMeta {
   id: SectionId
@@ -31,6 +31,7 @@ const SECTIONS: SectionMeta[] = [
   { id: 'general', label: '通用' },
   { id: 'lan', label: '平板互联' },
   { id: 'wechat', label: '微信' },
+  { id: 'feishu', label: '飞书' },
   { id: 'archived-projects', label: '归档项目' },
   { id: 'about', label: '关于' }
 ]
@@ -118,6 +119,7 @@ export function SettingsDialog({
             {active === 'general' && <GeneralSection />}
             {active === 'lan' && <LanSection />}
             {active === 'wechat' && <WechatSection />}
+            {active === 'feishu' && <FeishuSection />}
             {active === 'about' && <AboutSection />}
           </div>
         </div>
@@ -679,6 +681,176 @@ function WechatSection(): JSX.Element {
         <p className="info-text">
           登录后，可以在微信私聊中与 CloXde 助理交互。
         </p>
+      </div>
+    </div>
+  )
+}
+
+// --- Feishu channel section -----------------------------------------------
+
+interface FeishuStatus {
+  configured: boolean
+  appId: string | null
+}
+
+function FeishuSection(): JSX.Element {
+  const [feishuStatus, setFeishuStatus] = useState<FeishuStatus>({
+    configured: false,
+    appId: null
+  })
+  const [appIdInput, setAppIdInput] = useState('')
+  const [appSecretInput, setAppSecretInput] = useState('')
+  const [feishuLoading, setFeishuLoading] = useState(false)
+  const [feishuError, setFeishuError] = useState('')
+  const [feishuSuccess, setFeishuSuccess] = useState(false)
+
+  const reloadStatus = async (): Promise<void> => {
+    const result = await window.api.feishu.getStatus()
+    if (result.ok) {
+      setFeishuStatus(result.data)
+      if (result.data.appId) setAppIdInput(result.data.appId)
+    } else {
+      setFeishuError(result.error)
+    }
+  }
+
+  useEffect(() => {
+    void reloadStatus()
+  }, [])
+
+  const handleFeishuSetup = async (): Promise<void> => {
+    if (!appIdInput.trim() || !appSecretInput.trim()) {
+      setFeishuError('请填写 App ID 和 App Secret')
+      return
+    }
+
+    setFeishuLoading(true)
+    setFeishuError('')
+    setFeishuSuccess(false)
+
+    try {
+      const result = await window.api.feishu.setup(appIdInput.trim(), appSecretInput.trim())
+      if (result.ok) {
+        setFeishuSuccess(true)
+        setAppSecretInput('') // 清空密钥输入
+        await reloadStatus()
+        setTimeout(() => setFeishuSuccess(false), 3000)
+      } else {
+        setFeishuError(result.error)
+      }
+    } catch (e) {
+      setFeishuError((e as Error).message)
+    } finally {
+      setFeishuLoading(false)
+    }
+  }
+
+  const handleFeishuLogout = async (): Promise<void> => {
+    const result = await window.api.feishu.logout()
+    if (result.ok) {
+      setFeishuStatus({ configured: false, appId: null })
+      setAppIdInput('')
+      setAppSecretInput('')
+      setFeishuError('')
+      setFeishuSuccess(false)
+    } else {
+      setFeishuError(result.error)
+    }
+  }
+
+  return (
+    <div className="settings-pane">
+      <h3 style={{ marginTop: 0 }}>飞书集成</h3>
+
+      <p style={{ color: 'var(--fg-dim)', lineHeight: 1.6, marginBottom: 16 }}>
+        配置飞书应用后，团队可以在飞书群聊或私聊中 @CloXde 触发 AI 助理。
+        类似 Claude Tag 的使用体验。
+      </p>
+
+      {feishuStatus.configured ? (
+        <div className="feishu-configured">
+          <div className="feishu-status-box">
+            <div className="feishu-status-title">✅ 已配置</div>
+            <div style={{ marginTop: 8 }}>
+              <span style={{ color: 'var(--fg-dim)' }}>App ID: </span>
+              <code className="feishu-app-id">{feishuStatus.appId}</code>
+            </div>
+            <div style={{ marginTop: 12, fontSize: 13, color: 'var(--fg-dim)' }}>
+              Webhook 服务运行在: <code>http://0.0.0.0:8089/webhook</code>
+            </div>
+          </div>
+          <button
+            onClick={() => void handleFeishuLogout()}
+            style={{ marginTop: 12 }}
+            className="danger"
+          >
+            清除配置
+          </button>
+        </div>
+      ) : (
+        <div className="feishu-setup">
+          <label className="field">
+            <span>App ID</span>
+            <input
+              value={appIdInput}
+              onChange={(e) => setAppIdInput(e.target.value)}
+              placeholder="cli_xxxxxxxxxxxxxxxx"
+              spellCheck={false}
+            />
+          </label>
+
+          <label className="field">
+            <span>App Secret</span>
+            <input
+              type="password"
+              value={appSecretInput}
+              onChange={(e) => setAppSecretInput(e.target.value)}
+              placeholder="从飞书开放平台获取"
+              spellCheck={false}
+            />
+          </label>
+
+          <div className="settings-actions">
+            <button
+              onClick={() => void handleFeishuSetup()}
+              disabled={feishuLoading || !appIdInput.trim() || !appSecretInput.trim()}
+              className="primary"
+            >
+              {feishuLoading ? '配置中...' : '保存配置'}
+            </button>
+          </div>
+
+          {feishuSuccess && (
+            <p style={{ color: 'var(--success, #4ade80)', marginTop: 12 }}>
+              ✅ 配置成功！已启动 Webhook 服务
+            </p>
+          )}
+        </div>
+      )}
+
+      {feishuError && <p className="feishu-error" style={{ color: 'var(--danger, #e5534b)', marginTop: 12 }}>{feishuError}</p>}
+
+      <div className="feishu-info" style={{ marginTop: 24, padding: 16, background: 'var(--bg-elev)', borderRadius: 8 }}>
+        <h4 style={{ marginTop: 0, fontSize: 14 }}>📖 配置指南</h4>
+        <ol style={{ fontSize: 13, color: 'var(--fg-dim)', lineHeight: 1.8, paddingLeft: 20 }}>
+          <li>访问 <a href="https://open.feishu.cn" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--link)' }}>飞书开放平台</a> 创建企业自建应用</li>
+          <li>启用「机器人」能力，添加权限：<code>im:message</code> 和 <code>im:message:send_as_bot</code></li>
+          <li>订阅事件：<code>im.message.receive_v1</code></li>
+          <li>配置 Webhook URL：<code>http://your-ip:8089/webhook</code>（需外网可访问）</li>
+          <li>发布应用并复制 App ID 和 App Secret 到上方</li>
+        </ol>
+        <p style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 12, marginBottom: 0 }}>
+          💡 详细配置步骤请查看 <code>docs/feishu-integration.md</code>
+        </p>
+      </div>
+
+      <div style={{ marginTop: 16, padding: 12, background: 'var(--bg-wash, #2a2a2e)', borderRadius: 6 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8 }}>✨ 使用方式</div>
+        <ul style={{ fontSize: 12, color: 'var(--fg-dim)', lineHeight: 1.8, paddingLeft: 20, marginTop: 0, marginBottom: 0 }}>
+          <li><strong>单聊</strong>：搜索机器人名称，发送消息即可触发</li>
+          <li><strong>群聊</strong>：添加机器人到群，<code>@CloXde</code> 提及后发送消息</li>
+          <li><strong>主动报告</strong>：Assistant Review 会向活跃会话推送报告</li>
+        </ul>
       </div>
     </div>
   )

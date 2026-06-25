@@ -211,6 +211,14 @@ const api = {
     > => ipcRenderer.invoke(IPC.WeChatGetStatus),
     logout: (): Promise<IpcResult<true>> => ipcRenderer.invoke(IPC.WeChatLogout)
   },
+  feishu: {
+    setup: (appId: string, appSecret: string): Promise<IpcResult<true>> =>
+      ipcRenderer.invoke(IPC.FeishuSetup, appId, appSecret),
+    getStatus: (): Promise<
+      IpcResult<{ configured: boolean; appId: string | null }>
+    > => ipcRenderer.invoke(IPC.FeishuGetStatus),
+    logout: (): Promise<IpcResult<true>> => ipcRenderer.invoke(IPC.FeishuLogout)
+  },
   fs: {
     listDir: (projectId: string, relPath: string): Promise<IpcResult<DirEntry[]>> =>
       ipcRenderer.invoke(IPC.FsListDir, projectId, relPath),

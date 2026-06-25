@@ -12,6 +12,7 @@ import { stopAllWatches } from './fs/inspector'
 import { startHttpServer, stopHttpServer } from './server/http-server'
 import { setSupervisorIntent, flushSupervisorIntent } from './supervisor-intent'
 import * as wechatChannel from './wechat/channel'
+import * as feishuChannel from './feishu'
 
 const APP_PROTOCOL = 'cloxde'
 
@@ -266,6 +267,15 @@ app.whenReady().then(() => {
     console.error('[wechat] failed to start channel:', e)
   }
 
+  // Start Feishu channel and Webhook server.
+  try {
+    feishuChannel.start()
+    const feishuPort = Number(process.env.CLOXDE_FEISHU_PORT) || 8089
+    feishuChannel.startWebhookServer({ port: feishuPort })
+  } catch (e) {
+    console.error('[feishu] failed to start channel:', e)
+  }
+
   setupTray()
   configureAutoLaunch()
 
@@ -365,7 +375,9 @@ app.on('before-quit', (event) => {
         conversationEngine.disposeAll(),
         getAssistantBrain().dispose(),
         stopHttpServer(),
-        Promise.resolve(wechatChannel.stop())
+        Promise.resolve(wechatChannel.stop()),
+        Promise.resolve(feishuChannel.stop()),
+        Promise.resolve(feishuChannel.stopWebhookServer())
       ])
       closeStorage()
     } catch (e) {

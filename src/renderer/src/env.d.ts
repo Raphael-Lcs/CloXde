@@ -133,6 +133,11 @@ interface CloXdeApi {
     getStatus: () => Promise<IpcResult<{ loggedIn: boolean; accountId: string | null }>>
     logout: () => Promise<IpcResult<true>>
   }
+  feishu: {
+    setup: (appId: string, appSecret: string) => Promise<IpcResult<true>>
+    getStatus: () => Promise<IpcResult<{ configured: boolean; appId: string | null }>>
+    logout: () => Promise<IpcResult<true>>
+  }
   schedules: {
     listByConversation: (conversationId: string) => Promise<IpcResult<Schedule[]>>
     create: (input: {

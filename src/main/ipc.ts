@@ -45,6 +45,7 @@ import { listTokens, revokeAll, revokeToken, rotatePin } from './server/auth'
 import { presence, type ActivityKind } from './server/presence'
 import { getSoulPath, ensureCloxdeDir } from './paths'
 import * as wechatChannel from './wechat/channel'
+import * as feishuChannel from './feishu'
 
 function ok<T>(data: T): IpcResult<T> {
   return { ok: true, data }
@@ -881,6 +882,46 @@ export function registerIpcHandlers(): void {
     (): IpcResult<true> => {
       try {
         wechatChannel.logout()
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  // --- Feishu channel ----------------------------------------------------
+  ipcMain.handle(
+    IPC.FeishuSetup,
+    async (
+      _e,
+      appId: string,
+      appSecret: string
+    ): Promise<IpcResult<true>> => {
+      try {
+        await feishuChannel.setup(appId, appSecret)
+        return ok(true)
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.FeishuGetStatus,
+    (): IpcResult<{ configured: boolean; appId: string | null }> => {
+      try {
+        return ok(feishuChannel.getStatus())
+      } catch (e) {
+        return err((e as Error).message)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.FeishuLogout,
+    (): IpcResult<true> => {
+      try {
+        feishuChannel.logout()
         return ok(true)
       } catch (e) {
         return err((e as Error).message)

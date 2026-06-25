@@ -64,6 +64,11 @@ export const IPC = {
   WeChatGetStatus: 'wechat:get-status',
   WeChatLogout: 'wechat:logout',
 
+  // Feishu channel
+  FeishuSetup: 'feishu:setup',
+  FeishuGetStatus: 'feishu:get-status',
+  FeishuLogout: 'feishu:logout',
+
   // Events (main → renderer)
   ConversationUpdatedEvent: 'conversation:updated', // ConversationView snapshot
   MessageAppendedEvent: 'conversation:message-appended', // { conversationId, message }
