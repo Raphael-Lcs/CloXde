@@ -67,15 +67,19 @@ export function stop(): void {
  * 配置飞书应用凭证并启动
  */
 export async function setup(appId: string, appSecret: string): Promise<void> {
+  console.log('[feishu] setup called with appId:', appId.substring(0, 10) + '...')
+
   saveCredential(appId, appSecret)
 
-  // 立即启动（无需重启应用）
-  if (state.running) {
-    stop()
+  // 立即初始化 client（无需重启应用）
+  state.client = new FeishuClient({ appId, appSecret })
+  state.running = true
+
+  if (!state.reportUnsubscribe) {
+    state.reportUnsubscribe = subscribeToReports()
   }
 
-  start()
-  console.log('[feishu] setup completed and channel started')
+  console.log('[feishu] setup completed, client initialized and ready for Webhook events')
 }
 
 export function logout(): void {
